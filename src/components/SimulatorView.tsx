@@ -32,7 +32,7 @@ export function SimulatorView({ onSceneReady }: SimulatorViewProps) {
         const { ColladaLoader } = await import(/* @vite-ignore */ 'three/addons/loaders/ColladaLoader.js');
         const { OBJLoader } = await import(/* @vite-ignore */ 'three/addons/loaders/OBJLoader.js');
 
-        const customElementModule = await import(/* @vite-ignore */ '/src/urdf-manipulator-element.js');
+        const customElementModule = await import(/* @vite-ignore */ '/src/urdf-loader/urdf-manipulator-element.js');
         if (!customElements.get('urdf-viewer')) {
           customElements.define('urdf-viewer', customElementModule.default);
         }
