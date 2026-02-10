@@ -24,8 +24,11 @@ export function SimulatorView({ onSceneReady }: SimulatorViewProps) {
   const [isLoaded, setIsLoaded] = useState(false);
   const [rosStatus, setRosStatus] = useState<string>('Disconnected');
 
-  // データ置き場
-  const latestMessageRef = useRef<any>(null);
+  // ★変更点1: 配列をやめて「辞書（Map）」にする
+  // これにより、データが無限に溜まることを防ぎ、常に最新値だけを保持します
+  const jointPositionsRef = useRef<Map<string, number>>(new Map());
+  // 描画が必要かどうかのフラグ
+  const needsUpdateRef = useRef(false);
 
   // 1. ビューアー初期化 (変更なし)
   useEffect(() => {
@@ -97,7 +100,7 @@ export function SimulatorView({ onSceneReady }: SimulatorViewProps) {
   }, [onSceneReady]);
 
 
-  // 2. ROS接続 & 30fps固定更新ループ (確実性重視)
+  // 2. ROS接続 & 辞書ベースの高速描画
   useEffect(() => {
     const ros = new ROSLIB.Ros({ url: 'ws://localhost:9090' });
 
@@ -111,11 +114,16 @@ export function SimulatorView({ onSceneReady }: SimulatorViewProps) {
       messageType: 'sensor_msgs/msg/JointState'
     });
 
+    // ★変更点2: 受信時にMapを更新する
     jointListener.subscribe((message: any) => {
-       latestMessageRef.current = message;
+        for (let i = 0; i < message.name.length; i++) {
+            // 各ジョイントの「最新の値」を上書き保存
+            jointPositionsRef.current.set(message.name[i], message.position[i]);
+        }
+        needsUpdateRef.current = true; // 「新しいデータがあるよ」フラグを立てる
     });
 
-    // ★設定: FPS制限
+    // FPS制限 (30fps)
     const FPS = 30;
     const INTERVAL = 1000 / FPS;
 
@@ -125,47 +133,36 @@ export function SimulatorView({ onSceneReady }: SimulatorViewProps) {
     const animate = (currentTime: number) => {
         animationFrameId = requestAnimationFrame(animate);
 
-        // 時間が経っていなければスキップ (CPU/GPU負荷対策)
         const delta = currentTime - lastTime;
         if (delta < INTERVAL) {
             return;
         }
-        
-        // 基準時間を更新
         lastTime = currentTime - (delta % INTERVAL);
 
         const urdfElement = viewerRef.current as any;
-        const message = latestMessageRef.current;
-
-        // ★修正ポイント:
-        // 条件分岐を最小限にし、「データがあれば必ず適用する」ようにしました。
-        // これで「無視される」現象はなくなります。
+        
+        // ★変更点3: Mapの中身を適用する
+        // データが何万回来ようが、ここは「ジョイントの数」しかループしないので超高速・一定負荷
         if (urdfElement?.robot?.joints) {
             
-            // データがある場合のみ関節更新
-            if (message) {
-                for (let i = 0; i < message.name.length; i++) {
-                    const name = message.name[i];
-                    const position = message.position[i];
-                    
+            // 新しいデータが来ている時だけ関節を動かす
+            if (needsUpdateRef.current) {
+                jointPositionsRef.current.forEach((position, name) => {
                     const joint = urdfElement.robot.joints[name];
                     if (joint) {
-                        // 閾値チェック(IF文)を削除し、無条件で適用
                         joint.setJointValue(position);
                     }
-                }
+                });
+                // needsUpdateRef.current = false; // ← 安全のため、あえてフラグを下ろさず毎回適用してもOK（今回は念には念を入れて常時適用モードにします）
             }
 
-            // ★強制描画
-            // データ更新の有無にかかわらず 30fps で描画を回すことで、
-            // 「カメラ操作」や「後追いで届いたデータ」も確実に反映させます。
+            // 強制描画は常に行う
             if (urdfElement.renderer && urdfElement.scene && urdfElement.camera) {
                 urdfElement.renderer.render(urdfElement.scene, urdfElement.camera);
             }
         }
     };
 
-    // ループ開始
     animate(0);
 
     return () => {
