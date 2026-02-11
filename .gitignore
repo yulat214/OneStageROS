@@ -1,6 +1,9 @@
 # 依存関係 (絶対に除外)
 node_modules/
 
+ros2_data/
+urdf/
+
 # ビルドの出力結果 (自動生成されるため除外)
 dist/
 build/
