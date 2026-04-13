@@ -1,7 +1,10 @@
 # 依存関係
 node_modules/
 
-# ビルドの出力結果
+ros2_data/
+urdf/
+
+# ビルドの出力結果 (自動生成されるため除外)
 dist/
 build/
 .next/
