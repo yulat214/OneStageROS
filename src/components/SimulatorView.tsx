@@ -17,18 +17,29 @@ declare global {
 
 interface SimulatorViewProps {
   onSceneReady?: (scene: THREE.Scene) => void;
+  jointTopic?: string;
 }
 
-export function SimulatorView({ onSceneReady }: SimulatorViewProps) {
+export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: SimulatorViewProps) {
   const viewerRef = useRef<HTMLElement | null>(null);
   const [isLoaded, setIsLoaded] = useState(false);
   const [rosStatus, setRosStatus] = useState<string>('Disconnected');
 
-  // ★変更点1: 配列をやめて「辞書（Map）」にする
-  // これにより、データが無限に溜まることを防ぎ、常に最新値だけを保持します
   const jointPositionsRef = useRef<Map<string, number>>(new Map());
-  // 描画が必要かどうかのフラグ
   const needsUpdateRef = useRef(false);
+
+  // ★追加: 現在の推定ポーズ（内部で積分して保持する）
+  const currentPoseRef = useRef({
+    x: 0,
+    y: 0,
+    yaw: 0
+  });
+
+  // ★追加: cmd_vel の値を保持するRef
+  const cmdVelRef = useRef({
+    linearX: 0,
+    angularZ: 0
+  });
 
   // 1. ビューアー初期化 (変更なし)
   useEffect(() => {
@@ -48,10 +59,9 @@ export function SimulatorView({ onSceneReady }: SimulatorViewProps) {
         const viewer = viewerRef.current as any;
         if (!viewer) return;
         const hostname = window.location.hostname;
-const ASSET_SERVER_URL = `http://${hostname}:8000/`;        
+        const ASSET_SERVER_URL = `http://${hostname}:8000/`;        
 
         viewer.loadMeshFunc = (path: string, manager: any, done: any) => {
-          //const ASSET_SERVER_URL = 'http://localhost:8000/';
           let resolvedPath = path;
           if (path.indexOf('file://') > -1) {
              const marker = '/share/';
@@ -76,8 +86,7 @@ const ASSET_SERVER_URL = `http://${hostname}:8000/`;
           }
         };
 
-        // viewer.urdf = 'http://localhost:8000/robot.urdf';
-                viewer.urdf = `${ASSET_SERVER_URL}robot.urdf`;
+        viewer.urdf = `${ASSET_SERVER_URL}robot.urdf`;
 
         const checkScene = setInterval(() => {
             if (viewer.scene) {
@@ -103,78 +112,98 @@ const ASSET_SERVER_URL = `http://${hostname}:8000/`;
   }, [onSceneReady]);
 
 
-  // 2. ROS接続 & 辞書ベースの高速描画
+  // 2. ROS接続 & 運動学計算ループ
   useEffect(() => {
-    //const ros = new ROSLIB.Ros({ url: 'ws://localhost:9090' });
     const hostname = window.location.hostname;
-const ros = new ROSLIB.Ros({ url: `ws://${hostname}:9090` });
+    const ros = new ROSLIB.Ros({ url: `ws://${hostname}:9090` });
     ros.on('connection', () => setRosStatus('Connected'));
     ros.on('error', () => setRosStatus('Error'));
     ros.on('close', () => setRosStatus('Disconnected'));
 
     const jointListener = new ROSLIB.Topic({
       ros: ros,
-      name: '/joint_states',
+      name: jointTopic,
       messageType: 'sensor_msgs/msg/JointState'
     });
 
-    // ★変更点2: 受信時にMapを更新する
     jointListener.subscribe((message: any) => {
         for (let i = 0; i < message.name.length; i++) {
-            // 各ジョイントの「最新の値」を上書き保存
             jointPositionsRef.current.set(message.name[i], message.position[i]);
         }
-        needsUpdateRef.current = true; // 「新しいデータがあるよ」フラグを立てる
+        needsUpdateRef.current = true;
     });
 
-    // FPS制限 (30fps)
+    // ★追加: cmd_vel トピックの購読
+    const cmdVelListener = new ROSLIB.Topic({
+      ros: ros,
+      name: '/cmd_vel',
+      messageType: 'geometry_msgs/msg/Twist'
+    });
+
+    cmdVelListener.subscribe((message: any) => {
+      cmdVelRef.current = {
+        linearX: message.linear.x,
+        angularZ: message.angular.z
+      };
+    });
+
     const FPS = 30;
     const INTERVAL = 1000 / FPS;
 
     let animationFrameId: number;
-    let lastTime = 0;
+    let lastTime = performance.now(); // ★変更: dt計算のため高精度タイマーを使用
 
-    const animate = (currentTime: number) => {
+    const animate = (time: number) => {
         animationFrameId = requestAnimationFrame(animate);
 
-        const delta = currentTime - lastTime;
-        if (delta < INTERVAL) {
-            return;
-        }
-        lastTime = currentTime - (delta % INTERVAL);
+        const delta = time - lastTime;
+        if (delta < INTERVAL) return;
+        
+        // 経過秒数 (dt)
+        const dt = delta / 1000;
+        lastTime = time;
 
         const urdfElement = viewerRef.current as any;
         
-        // ★変更点3: Mapの中身を適用する
-        // データが何万回来ようが、ここは「ジョイントの数」しかループしないので超高速・一定負荷
-        if (urdfElement?.robot?.joints) {
+        if (urdfElement?.robot) {
             
-            // 新しいデータが来ている時だけ関節を動かす
-            if (needsUpdateRef.current) {
+            // ★追加: 簡易シミュレーション（運動学の計算）
+            const { linearX, angularZ } = cmdVelRef.current;
+            const pose = currentPoseRef.current;
+
+            // 向き(yaw)の更新
+            pose.yaw += angularZ * dt;
+            // 座標(x, y)の更新 (前進速度を現在の向きに合わせて分解)
+            pose.x += linearX * Math.cos(pose.yaw) * dt;
+            pose.y += linearX * Math.sin(pose.yaw) * dt;
+
+            // Three.jsのオブジェクトに反映
+            urdfElement.robot.position.set(pose.x, pose.y, 0);
+            urdfElement.robot.rotation.z = pose.yaw; // urdf-viewerのup=+Z設定に合わせる
+
+            // ジョイントの更新処理
+            if (urdfElement.robot.joints && needsUpdateRef.current) {
                 jointPositionsRef.current.forEach((position, name) => {
                     const joint = urdfElement.robot.joints[name];
-                    if (joint) {
-                        joint.setJointValue(position);
-                    }
+                    if (joint) joint.setJointValue(position);
                 });
-                // needsUpdateRef.current = false; // ← 安全のため、あえてフラグを下ろさず毎回適用してもOK（今回は念には念を入れて常時適用モードにします）
             }
 
-            // 強制描画は常に行う
             if (urdfElement.renderer && urdfElement.scene && urdfElement.camera) {
                 urdfElement.renderer.render(urdfElement.scene, urdfElement.camera);
             }
         }
     };
 
-    animate(0);
+    animate(performance.now());
 
     return () => {
         cancelAnimationFrame(animationFrameId);
         jointListener.unsubscribe();
+        cmdVelListener.unsubscribe(); // ★追加
         ros.close();
     };
-  }, []); 
+  }, [jointTopic]); 
 
 
   return (
