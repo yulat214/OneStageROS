@@ -1,76 +1,91 @@
-import { useState, useEffect } from 'react';
-import type * as THREE from 'three'; // 型定義のために追加
+import { useState } from 'react';
+import type * as THREE from 'three';
 import { SimulatorView } from './components/SimulatorView';
 import { RobotCameraView } from './components/RobotCameraView';
 import { DebugLog } from './components/DebugLog';
-import { Info, Moon, Sun } from 'lucide-react';
+import { MonitorPlay, Code2 } from 'lucide-react';
+
+type TabType = 'simulator' | 'editor';
 
 export default function App() {
-  const [darkMode, setDarkMode] = useState(false);
+  const [activeTab, setActiveTab] = useState<TabType>('simulator');
   
-  // ★追加: SimulatorViewからシーンを受け取り、RobotCameraViewへ渡すためのState
+  // SimulatorViewからシーンを受け取り、RobotCameraViewへ渡すためのState
   const [sharedScene, setSharedScene] = useState<THREE.Scene | null>(null);
 
-  // ダークモードの適用
-  useEffect(() => {
-    if (darkMode) {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
-  }, [darkMode]);
-
   return (
-    <div className="h-screen flex flex-col bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 overflow-hidden transition-colors">
-      {/* ヘッダー - 説明セクション */}
-      <header className="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-4 py-3 flex-shrink-0 shadow-sm">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-start gap-3">
-            <Info className="w-5 h-5 mt-0.5 text-blue-600 dark:text-blue-400 flex-shrink-0" />
-            <div>
-              <h1 className="text-gray-900 dark:text-gray-100 mb-1">ロボットシミュレータ</h1>
-              <p className="text-gray-600 dark:text-gray-400 text-sm">
-                メインビューでロボットの動作を確認できます。右側のカメラビューでロボット視点を、デバッグログで詳細情報を確認できます。
+    <div className="h-screen flex flex-col bg-gray-50 text-gray-900 overflow-hidden">
+      
+      {/* 1. タブナビゲーション (ヘッダー部分を変更) */}
+      <nav className="bg-white border-b border-gray-200 flex-shrink-0 shadow-sm z-10">
+        <div className="flex px-4 h-14 items-end gap-2">
+          <button
+            onClick={() => setActiveTab('simulator')}
+            className={`
+              flex items-center gap-2 px-6 py-3 text-base font-medium rounded-t-lg transition-all duration-200 border-t border-l border-r -mb-px
+              ${activeTab === 'simulator'
+                ? 'bg-white border-gray-200 text-blue-600 border-b-white' 
+                : 'bg-gray-50 border-transparent text-gray-500 hover:text-gray-800 hover:bg-gray-100 border-b-gray-200'
+              }
+            `}
+          >
+            <MonitorPlay className="w-5 h-5" />
+            シミュレータ
+          </button>
+          
+          <button
+            onClick={() => setActiveTab('editor')}
+            className={`
+              flex items-center gap-2 px-6 py-3 text-base font-medium rounded-t-lg transition-all duration-200 border-t border-l border-r -mb-px
+              ${activeTab === 'editor'
+                ? 'bg-white border-gray-200 text-blue-600 border-b-white'
+                : 'bg-gray-50 border-transparent text-gray-500 hover:text-gray-800 hover:bg-gray-100 border-b-gray-200'
+              }
+            `}
+          >
+            <Code2 className="w-5 h-5" />
+            エディター
+          </button>
+        </div>
+      </nav>
+
+      {/* 2. メインコンテンツエリア */}
+      {/* 元のコードの main タグのスタイルを維持しつつ、タブ切り替えを実装 */}
+      <main className="flex-1 flex flex-col p-4 min-h-0 overflow-hidden">
+        
+        {activeTab === 'simulator' ? (
+          // === 元のレイアウト (シミュレータ) ===
+          <div className="flex-1 flex flex-col md:flex-row gap-4 min-h-0">
+            {/* 左側：メインシミュレータビュー */}
+            <div className="flex-1 md:max-w-[60%] flex flex-col min-h-0 min-w-0 bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+              <SimulatorView onSceneReady={setSharedScene} />
+            </div>
+
+            {/* 右側：カメラビュー & デバッグログ */}
+            <aside className="flex flex-col md:flex-1 gap-4 min-h-0">
+              {/* ロボットカメラビュー (flex-[1.5]) */}
+              <div className="flex-[1.5] min-h-[250px] md:min-h-[320px] bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+                <RobotCameraView scene={sharedScene} />
+              </div>
+
+              {/* デバッグログ (flex-1) */}
+              <div className="flex-1 min-h-[200px] md:min-h-[250px] bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+                <DebugLog />
+              </div>
+            </aside>
+          </div>
+        ) : (
+          // === エディター (新規追加) ===
+          <div className="flex-1 bg-white rounded-lg border border-gray-200 shadow-sm flex items-center justify-center">
+            <div className="text-center">
+              <Code2 className="w-16 h-16 text-gray-300 mx-auto mb-4" />
+              <h2 className="text-xl font-bold text-gray-700 mb-2">Editor Mode</h2>
+              <p className="text-sm text-gray-500">
+                ここにエディター機能が実装されます
               </p>
             </div>
           </div>
-          
-          {/* ダークモード切り替えボタン */}
-          <button
-            onClick={() => setDarkMode(!darkMode)}
-            className="flex-shrink-0 p-2 rounded-lg bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
-            aria-label="ダークモード切り替え"
-          >
-            {darkMode ? (
-              <Sun className="w-5 h-5 text-yellow-500" />
-            ) : (
-              <Moon className="w-5 h-5 text-gray-700" />
-            )}
-          </button>
-        </div>
-      </header>
-
-      {/* メインコンテンツエリア */}
-      <main className="flex-1 flex flex-col md:flex-row gap-4 p-4 min-h-0">
-        {/* 左側：メインシミュレータビュー - より正方形寄りに */}
-        <div className="flex-1 md:max-w-[60%] flex flex-col min-h-0 min-w-0">
-          {/* ★修正: シーンができたら sharedScene にセットするコールバックを渡す */}
-          <SimulatorView onSceneReady={setSharedScene} />
-        </div>
-
-        {/* 右側：カメラビュー & デバッグログ */}
-        <aside className="flex flex-col md:flex-1 gap-4 min-h-0">
-          {/* ロボットカメラビュー - 比率を上げる */}
-          <div className="flex-[1.5] min-h-[250px] md:min-h-[320px]">
-            {/* ★修正: 共有されたシーンを渡す */}
-            <RobotCameraView scene={sharedScene} />
-          </div>
-
-          {/* デバッグログ */}
-          <div className="flex-1 min-h-[200px] md:min-h-[250px]">
-            <DebugLog />
-          </div>
-        </aside>
+        )}
       </main>
     </div>
   );

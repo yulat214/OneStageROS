@@ -47,9 +47,11 @@ export function SimulatorView({ onSceneReady }: SimulatorViewProps) {
 
         const viewer = viewerRef.current as any;
         if (!viewer) return;
+        const hostname = window.location.hostname;
+const ASSET_SERVER_URL = `http://${hostname}:8000/`;        
 
         viewer.loadMeshFunc = (path: string, manager: any, done: any) => {
-          const ASSET_SERVER_URL = 'http://localhost:8000/';
+          //const ASSET_SERVER_URL = 'http://localhost:8000/';
           let resolvedPath = path;
           if (path.indexOf('file://') > -1) {
              const marker = '/share/';
@@ -74,7 +76,8 @@ export function SimulatorView({ onSceneReady }: SimulatorViewProps) {
           }
         };
 
-        viewer.urdf = 'http://localhost:8000/robot.urdf';
+        // viewer.urdf = 'http://localhost:8000/robot.urdf';
+                viewer.urdf = `${ASSET_SERVER_URL}robot.urdf`;
 
         const checkScene = setInterval(() => {
             if (viewer.scene) {
@@ -102,8 +105,9 @@ export function SimulatorView({ onSceneReady }: SimulatorViewProps) {
 
   // 2. ROS接続 & 辞書ベースの高速描画
   useEffect(() => {
-    const ros = new ROSLIB.Ros({ url: 'ws://localhost:9090' });
-
+    //const ros = new ROSLIB.Ros({ url: 'ws://localhost:9090' });
+    const hostname = window.location.hostname;
+const ros = new ROSLIB.Ros({ url: `ws://${hostname}:9090` });
     ros.on('connection', () => setRosStatus('Connected'));
     ros.on('error', () => setRosStatus('Error'));
     ros.on('close', () => setRosStatus('Disconnected'));

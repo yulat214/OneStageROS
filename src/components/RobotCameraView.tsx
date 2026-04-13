@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { Video } from 'lucide-react';
 import type * as THREE from 'three';
 
@@ -7,8 +7,10 @@ interface RobotCameraViewProps {
 }
 
 export function RobotCameraView({ scene }: RobotCameraViewProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [isReady, setIsReady] = useState(false);
+  // サイズを測るための外枠
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  // Three.jsを差し込むためのコンテナ
+  const canvasContainerRef = useRef<HTMLDivElement>(null);
 
   const targetLinkName = "imu_link"; 
 
@@ -17,69 +19,83 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
     let renderer: THREE.WebGLRenderer | null = null;
     let camera: THREE.PerspectiveCamera | null = null;
     let loopId: number;
+    let resizeObserver: ResizeObserver | null = null;
 
     const initRobotCamera = async () => {
-        if (!containerRef.current) return;
-
-        const THREE = await import(/* @vite-ignore */ 'three');
-
-        if (!isMounted) return;
-        const container = containerRef.current;
-        if (!container) return;
-
-        const width = container.clientWidth;
-        const height = container.clientHeight;
-
-        // --- カメラ設定 ---
-        camera = new THREE.PerspectiveCamera(60, width / height, 0.01, 100);
+        if (!wrapperRef.current || !canvasContainerRef.current) return;
         
-        // 初期位置（ターゲットが見つかるまでの仮の位置）
+        const canvasContainer = canvasContainerRef.current;
+        const THREE = await import(/* @vite-ignore */ 'three');
+        
+        if (!isMounted) return;
+
+        // --- 1. 初期化 ---
+        // サイズはCSSで勝手に決まるので、解像度の初期値は何でも良い
+        camera = new THREE.PerspectiveCamera(60, 4 / 3, 0.01, 100);
         camera.position.set(0.5, 0, 0.5);
         camera.lookAt(0, 0, 0);
 
-        // --- レンダラー設定 ---
         renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
-        renderer.setSize(width, height);
         renderer.setPixelRatio(window.devicePixelRatio);
         
-        container.appendChild(renderer.domElement);
+        // ★ここが重要：Canvasを親に合わせて無理やり広げる設定
+        // width/height: 100% にすることで、親のサイズに追従します
+        renderer.domElement.style.width = '100%';
+        renderer.domElement.style.height = '100%';
+        renderer.domElement.style.display = 'block';
 
-        // 位置取得用の一次変数（メモリ節約のためループ外で作成）
+        // 既存の中身をクリアして追加
+        while (canvasContainer.firstChild) {
+            canvasContainer.removeChild(canvasContainer.firstChild);
+        }
+        canvasContainer.appendChild(renderer.domElement);
+
+
+        // --- 2. サイズ変更の監視 ---
+        resizeObserver = new ResizeObserver((entries) => {
+            if (!isMounted || !renderer || !camera) return;
+
+            for (const entry of entries) {
+                const { width, height } = entry.contentRect;
+                if (width === 0 || height === 0) return;
+
+                // レンダラー（画質）のサイズを更新
+                renderer.setSize(width, height, false); // false: Canvasのstyle.width/heightを上書きしない
+                
+                // カメラのアスペクト比を更新（映像が伸びないように）
+                camera.aspect = width / height;
+                camera.updateProjectionMatrix();
+            }
+        });
+        
+        // 外枠（wrapper）を監視
+        resizeObserver.observe(wrapperRef.current);
+
+
+        // --- 3. 描画ループ ---
         const targetPos = new THREE.Vector3();
         const targetQuat = new THREE.Quaternion();
-        const offset = new THREE.Vector3(0, 0, 0); // 必要ならここで位置をずらす
 
-        // --- 描画ループ ---
         const animate = () => {
             if (!isMounted) return;
             loopId = requestAnimationFrame(animate);
 
             if (renderer && scene && camera) {
-                // ★ここでロボットの特定パーツを探して位置を同期する
                 const targetObject = scene.getObjectByName(targetLinkName);
-
                 if (targetObject) {
-                    // ターゲットのワールド座標と回転を取得
                     targetObject.getWorldPosition(targetPos);
                     targetObject.getWorldQuaternion(targetQuat);
-
-                    // カメラに適用
                     camera.position.copy(targetPos);
                     camera.quaternion.copy(targetQuat);
-                    
                     camera.rotateY(-Math.PI / 2); 
-                    // camera.rotateX(-Math.PI / 2);
                     camera.rotateZ(-Math.PI / 2);
-
-                    // 【補正】埋もれる場合は少し前にずらす (ローカル座標系でZ方向に移動)
                     camera.translateZ(-0.1); 
                 }
-
                 renderer.render(scene, camera);
             }
         };
+
         animate();
-        setIsReady(true);
     };
 
     if (scene) {
@@ -89,6 +105,7 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
     return () => {
         isMounted = false;
         if (loopId) cancelAnimationFrame(loopId);
+        if (resizeObserver) resizeObserver.disconnect();
         if (renderer) {
             renderer.dispose();
             const canvas = renderer.domElement;
@@ -96,12 +113,11 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
                 canvas.parentNode.removeChild(canvas);
             }
         }
-        setIsReady(false);
     };
   }, [scene]);
 
   return (
-    <div className="h-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg overflow-hidden flex flex-col shadow-sm">
+    <div className="h-full w-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg overflow-hidden flex flex-col shadow-sm">
       {/* ヘッダー */}
       <div className="bg-gray-100 dark:bg-gray-700 px-4 py-2 border-b border-gray-300 dark:border-gray-600 flex items-center gap-2 flex-shrink-0">
         <Video className="w-4 h-4 text-green-600 dark:text-green-400" />
@@ -114,24 +130,25 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
         </span>
       </div>
 
-      {/* コンテンツエリア - 4:3 または 848:480 の比率を維持 */}
-      <div className="flex-1 flex items-center justify-center p-3 min-h-0 bg-gray-50 dark:bg-gray-900 overflow-hidden">
-        <div className="w-full h-full max-w-full max-h-full flex items-center justify-center relative">
-          <div className="w-full max-w-full max-w-full max-h-full aspect-[4/3] dark:bg-gray-700 border-2 border-dashed dark:border-gray-300 rounded flex items-center justify-center overflow-hidden relative">
+      {/* コンテンツエリア */}
+      {/* relative: これを基準にする */}
+      {/* flex-1 min-h-0: これで親の縮小に合わせて縮むようになる */}
+      <div className="flex-1 p-4 min-h-0 bg-gray-50 dark:bg-gray-900 relative overflow-hidden">
+        
+        {/* 点線枠 (Wrapper) */}
+        {/* w-full h-full: 親に合わせて広がる */}
+        <div 
+            ref={wrapperRef}
+            className="w-full h-full border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg relative overflow-hidden"
+        >
+            {/* ★ここが最大のポイント: absolute inset-0
+               これにより、Canvasは「幽体」になり、親のサイズ計算に一切干渉しなくなります。
+               親が縮めば、文句を言わずに一緒に縮みます。
+            */}
+            <div ref={canvasContainerRef} className="absolute inset-0 w-full h-full bg-black" />
             
-            <div ref={containerRef} className="w-auto h-full aspect-[4/3] absolute inset-0 bg-black flex items-center justify-center">
-              {!isReady && (
-                <div className="text-center bg-gray-100 w-full h-full flex flex-col items-center justify-center">
-                     {/* 待機画面 */}
-                    <div className="w-12 h-12 bg-green-50 border-2 border-green-500 rounded-lg mx-auto mb-3 flex items-center justify-center">
-                        <Video className="w-6 h-6 text-green-600" />
-                    </div>
-                    <p className="text-gray-600 text-sm">接続待機中...</p>
-                </div>
-              )}
-            </div>
-          </div>
         </div>
+
       </div>
     </div>
   );

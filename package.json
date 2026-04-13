@@ -3,6 +3,8 @@
       "version": "0.1.0",
       "private": true,
       "dependencies": {
+            "@react-three/drei": "^10.7.7",
+            "@react-three/fiber": "^9.5.0",
             "concurrently": "^9.2.1",
             "cors": "^2.8.6",
             "express": "^5.2.1",
@@ -23,7 +25,7 @@
             "vite": "^6.4.1"
       },
       "scripts": {
-            "dev": "vite",
+            "dev": "vite --host 0.0.0.0",
             "build": "vite build",
             "serve:ros": "node server/assets-server.js",
             "start": "concurrently \"npm run serve:ros\" \"npm run dev\" --names \"SERVER,CLIENT\" -c \"blue,green\""
