@@ -2,62 +2,38 @@
 
 > ブラウザだけでROS開発を完結させる軽量開発環境
 
-## 概要
+本ツールは、ROS 2 初学者が開発環境の構築や複雑なツールの切り替えに迷うことなく、ロボットの制御とデバッグに集中できるように設計された Web ベースの統合開発環境です。
 
-本ツールは、Webブラウザ上でロボット開発を1画面で完結させることを目的とした、初学者向け開発環境です。
+*※ここにデモ動画やスクリーンショットを配置予定*
 
-ROS環境と連携しながら、以下の機能を統合的に提供します：
-- Robot Simulator（※物理エンジン不使用）
-- Camera
-- Log + Log Analyzer
-- Editor
+---
+### 💎 主な機能
+- **Robot Simulator**: 物理エンジンを使用しない、動作確認に特化した軽量 3D レンダラー。
+- **Camera Viewer**: ロボットからの画像トピックをリアルタイムに表示。
+- **Log & Log Analyzer**: 実行ログの表示に加え、LLM 等を活用したエラー分析をサポート。
+- **Web Editor**: Monaco Editor を内蔵し、ブラウザ上で直接スクリプトを編集可能。
 
-ROSの複雑な構成を意識せず、視覚的かつ直感的にロボット開発・検証を行うことができます。
+---
 
-## デモ
+## 💻 動作環境
+以下の環境での動作を想定しています。
 
-※ デモ動画掲載予定
+- **OS/Distro**: ROS 2 Humble (Docker コンテナ、またはホスト直接の両方に対応)
+- **Runtime**: Node.js, npm
+- **Network**: Docker 等を使用する場合、以下のポート開放が必要です。
+    - `3000`: フロントエンド（Web 画面）
+    - `8000`: バックエンド API
+    - `9090`: ROS Bridge (WebSocket 通信用)
 
-## 想定ユーザー
+---
 
-- ROS初学者
-- ロボット開発をこれから学ぶ学生
-- ロボットを教える教員
-- 環境構築や可視化に手間をかけずに検証したい開発者
-
-## 前提環境
-
-本ツールは以下の環境が整っていることを前提とします：
-
-- ROS 2 Humble 環境（Docker / ホストどちらでも可）
-  - 他のDISTROは未検証、これから検証予定です
-- Node.js / npm がインストール済み
-
-### Docker利用時の注意
-
-以下のポートが使用可能である必要があります：
-
-- 3000
-- 8000
-- 9090
-
-### 対応ブラウザ
-- Google Chrome
-
-## Node.jsのインストール
-```bash
-apt install nodejs npm -y
-sudo npm install n -g
-sudo n stable
-sudo apt purge -y nodejs npm
-sudo apt autoremove -y
-```
-
-## クイックスタート
+## 🛠 セットアップ
+リポジトリをクローンし、必要な依存関係をインストールします。
 
 ```bash
-cd ~
+# ホームディレクトリ等で実行
+cd ~/.
 git clone https://github.com/yulat214/test_robot_tools
 cd test_robot_tools
-npm install
-```
+npm install```
+
