@@ -34,10 +34,6 @@ https://github.com/user-attachments/assets/cc137886-75bb-4efb-8c5d-7c5432c0d9a7
 
 - robot_state_publisherの起動
 
-https://github.com/user-attachments/assets/260197a4-36d0-4119-a5a3-038353e26a96
-
-
-
 ---
 
 ## セットアップ
