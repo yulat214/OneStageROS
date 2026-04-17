@@ -32,7 +32,7 @@ try {
     console.log(`Found ${xacroFiles.length} .xacro files.`);
 
     xacroFiles.forEach(xacroPath => {
-        // 出力ファイル名: .xacro を削除して .urdf にする
+        // 出力ファイル名:
         // 例: robot.urdf.xacro -> robot.urdf
         // 例: robot.xacro -> robot.urdf
         let urdfPath = xacroPath.replace('.xacro', '');
@@ -43,13 +43,10 @@ try {
         try {
             console.log(`🔨 Converting: ${path.basename(xacroPath)} -> ${path.basename(urdfPath)}`);
             
-            // ROS 2の xacro コマンドを実行
-            // source /opt/ros/... は環境によっては不要ですが念のため
             execSync(`xacro ${xacroPath} > ${urdfPath}`, { stdio: 'inherit' });
             
         } catch (e) {
             console.error(`❌ Failed to convert ${path.basename(xacroPath)}`);
-            // エラーでも止まらず次へ
         }
     });
     console.log('✅ Xacro conversion complete!');

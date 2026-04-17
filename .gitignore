@@ -1,13 +1,13 @@
-# 依存関係 (絶対に除外)
+# 依存関係
 node_modules/
 
-# ビルドの出力結果 (自動生成されるため除外)
+# ビルドの出力結果
 dist/
 build/
 .next/
 out/
 
-# 環境変数 (パスワードなどが含まれるため絶対に除外)
+# 環境変数
 .env
 .env.local
 .env.*.local
@@ -17,10 +17,10 @@ npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*
 
-# OSのシステムファイル (Mac/Windowsのゴミファイル)
+# OSのシステムファイル
 .DS_Store
 Thumbs.db
 
-# エディタの設定ファイル (個人の設定は共有しない)
+# エディタの設定ファイル
 .vscode/
 .idea/
