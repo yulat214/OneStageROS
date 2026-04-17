@@ -67,13 +67,13 @@ export default function App() {
 
             {/* 右側：カメラビュー & デバッグログ */}
             <aside className="flex flex-col md:flex-1 gap-4 min-h-0">
-              {/* ロボットカメラビュー */}
-              <div className="flex-[1.5] min-h-[250px] md:min-h-[320px] bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+              {/* ロボットカメラビュー：flex-1 */}
+              <div className="flex-1 min-h-[250px] bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
                 <RobotCameraView scene={sharedScene} />
               </div>
 
-              {/* デバッグログ */}
-              <div className="flex-1 min-h-[200px] md:min-h-[250px] bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+              {/* デバッグログ：flex-1 */}
+              <div className="flex-1 min-h-[250px] bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
                 <DebugLog />
               </div>
             </aside>
