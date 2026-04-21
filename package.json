@@ -29,7 +29,7 @@
       "scripts": {
             "dev": "vite --host 0.0.0.0",
             "build": "vite build",
-            "serve:ros": "node server/sync-minimal.js && npx http-server ./ros2_data -a localhost -p 8000 --cors",
+            "serve:ros": "node server/assets-server.js",
 	    "start": "concurrently \"npm run serve:ros\" \"npm run dev\" --names \"SERVER,CLIENT\" -c \"blue,green\""
 
       }

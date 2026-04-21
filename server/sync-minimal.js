@@ -103,7 +103,7 @@ function extractAssets() {
     console.log('Minimal asset extraction complete!');
     console.log(`URDF saved to: ${path.join(OUTPUT_DIR, 'robot.urdf')}`);
     
-    process.exit(0);
+    // process.exit(0);
 }
 
 // 最初の実行をトリガー

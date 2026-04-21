@@ -1,5 +1,6 @@
 # 依存関係
 node_modules/
+ros2_data/
 
 # ビルドの出力結果
 dist/
