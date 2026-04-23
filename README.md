@@ -55,7 +55,7 @@ npm install
 動作確認したいロボットに関するlaunch等によって、上記topicが流れている状態で
 ```bash
 cd OneStageROS
-run npm start
+npm run start
 ```
 を実行し、ブラウザから`http://localhost:3000`にアクセス
 
