@@ -1,4 +1,4 @@
-# test_robot_tools
+# OneStageROS
 
 > ブラウザだけでROS開発を完結させる軽量開発環境
 
@@ -33,8 +33,8 @@ https://github.com/user-attachments/assets/cc137886-75bb-4efb-8c5d-7c5432c0d9a7
 ```bash
 # ホームディレクトリ等で実行
 cd ~/.
-git clone https://github.com/yulat214/test_robot_tools
-cd test_robot_tools
+git clone https://github.com/yulat214/OneStageROS
+cd OneStageROS
 npm install
 ```
 
@@ -52,7 +52,7 @@ npm install
 ## 利用方法
 動作確認したいロボットに関するlaunch等によって、上記topicが流れている状態で
 ```bash
-cd test_robot_tools
+cd OneStageROS
 run npm start
 ```
 を実行し、ブラウザから`http://localhost:3000`にアクセス
