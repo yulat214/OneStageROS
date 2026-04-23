@@ -17,7 +17,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, select
   const [items, setItems] = useState<FileItem[]>([]);
   const [loading, setLoading] = useState(false);
 
-  const API_BASE = 'http://localhost:8000/api';
+  const API_BASE = `http://${window.location.hostname}:8000/api`;
 
   // ディレクトリの中身を取得する
   const fetchDirectory = async (pathToFetch: string) => {

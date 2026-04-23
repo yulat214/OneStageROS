@@ -11,7 +11,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({ filePath }) => {
   const [isSaving, setIsSaving] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
-  const API_BASE = 'http://localhost:8000/api';
+  const API_BASE = `http://${window.location.hostname}:8000/api`;
 
   useEffect(() => {
     if (!filePath) {

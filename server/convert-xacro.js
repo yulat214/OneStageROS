@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { spawnSync } = require('child_process');
 
 // ROSワークスペースの場所
 const WORKSPACE_DIR = process.env.ROS_WORKSPACE || path.join(process.env.HOME, 'ros2_ws/src');
@@ -43,7 +43,9 @@ try {
         try {
             console.log(`🔨 Converting: ${path.basename(xacroPath)} -> ${path.basename(urdfPath)}`);
             
-            execSync(`xacro ${xacroPath} > ${urdfPath}`, { stdio: 'inherit' });
+            const result = spawnSync('xacro', [xacroPath], { encoding: 'utf-8' });
+            if (result.status !== 0) throw new Error(result.stderr || 'xacro failed');
+            fs.writeFileSync(urdfPath, result.stdout);
             
         } catch (e) {
             console.error(`❌ Failed to convert ${path.basename(xacroPath)}`);

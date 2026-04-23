@@ -78,6 +78,7 @@ function extractAssets() {
 
     requiredPackages.forEach(pkgName => {
         try {
+            if (!/^[\w_]+$/.test(pkgName)) throw new Error(`Invalid package name: ${pkgName}`);
             // パッケージのインストール先を特定
             const prefixPath = execSync(`ros2 pkg prefix ${pkgName}`, { encoding: 'utf-8', stdio: 'pipe' }).trim();
             const sharePath = path.join(prefixPath, 'share', pkgName);

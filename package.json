@@ -1,6 +1,17 @@
 {
-      "name": "ロボットシミュレータ画面設計",
-      "version": "0.1.0",
+      "name": "onestage-ros",
+      "version": "1.0.0",
+      "description": "A browser-based ROS 2 development IDE — URDF visualizer, code editor, and debug console in one tab.",
+      "author": "yulala tateno <shigineko64@yahoo.co.jp>",
+      "license": "MIT",
+      "repository": {
+            "type": "git",
+            "url": "https://github.com/an/OneStageROS.git"
+      },
+      "homepage": "https://github.com/an/OneStageROS#readme",
+      "bugs": {
+            "url": "https://github.com/an/OneStageROS/issues"
+      },
       "private": true,
       "dependencies": {
             "@monaco-editor/react": "^4.7.0",
@@ -9,6 +20,7 @@
             "concurrently": "^9.2.1",
             "cors": "^2.8.6",
             "express": "^5.2.1",
+            "express-rate-limit": "^8.4.0",
             "lucide-react": "^0.487.0",
             "monaco-editor": "^0.55.1",
             "rclnodejs": "^1.8.1",
@@ -30,7 +42,6 @@
             "dev": "vite --host 0.0.0.0",
             "build": "vite build",
             "serve:ros": "node server/assets-server.js",
-	    "start": "concurrently \"npm run serve:ros\" \"npm run dev\" --names \"SERVER,CLIENT\" -c \"blue,green\""
-
+            "start": "concurrently \"npm run serve:ros\" \"npm run dev\" --names \"SERVER,CLIENT\" -c \"blue,green\""
       }
 }

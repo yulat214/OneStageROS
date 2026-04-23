@@ -29,7 +29,7 @@ export function DebugLog() {
   const rosRef = useRef<ROSLIB.Ros | null>(null);
 
   useEffect(() => {
-    const ros = new ROSLIB.Ros({ url: 'ws://localhost:9090' });
+    const ros = new ROSLIB.Ros({ url: `ws://${window.location.hostname}:9090` });
     rosRef.current = ros;
 
     ros.on('connection', () => setIsConnected(true));
