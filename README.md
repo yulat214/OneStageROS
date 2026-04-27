@@ -1,10 +1,11 @@
-# test_robot_tools
+# OneStageROS
 
 > ブラウザだけでROS開発を完結させる軽量開発環境
 
 本ツールは、ROS 2 初学者が開発環境の構築や複雑なツールの切り替えに迷うことなく、ロボットの制御とデバッグに集中できるように設計された Web ベースの統合開発環境です。
+<img width="3263" height="1973" alt="2026-04-23-14:18:49-screenshot" src="https://github.com/user-attachments/assets/9528a728-ee5f-437c-af25-db9c99be44b6" />
 
-https://github.com/user-attachments/assets/cc137886-75bb-4efb-8c5d-7c5432c0d9a7
+デモは[こちらの動画](https://youtu.be/tN1MnzoIzKw)をご覧ください。
 
 ---
 ### 主な機能
@@ -33,17 +34,18 @@ https://github.com/user-attachments/assets/cc137886-75bb-4efb-8c5d-7c5432c0d9a7
 ```bash
 # ホームディレクトリ等で実行
 cd ~/.
-git clone https://github.com/yulat214/test_robot_tools
-cd test_robot_tools
+git clone https://github.com/yulat214/OneStageROS
+cd OneStageROS
 npm install
 ```
 
 ---
 
 ## 実行時に必要な情報
+実機のbringup等のlaunchから、ハードウェアとの接続部分を除いた情報で使用可能です。
 - /joint_states: `sensor_msgs/msg/JointState`
 - /rosout: `rcl_interfaces/msg/Log`
-- /cmd_vel: ` geometry_msgs/msg/Twist`
+- /cmd_vel: `geometry_msgs/msg/Twist`
 
 - robot_state_publisherの起動
 
@@ -52,8 +54,8 @@ npm install
 ## 利用方法
 動作確認したいロボットに関するlaunch等によって、上記topicが流れている状態で
 ```bash
-cd test_robot_tools
-run npm start
+cd OneStageROS
+npm run start
 ```
 を実行し、ブラウザから`http://localhost:3000`にアクセス
 
