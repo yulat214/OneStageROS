@@ -25,7 +25,7 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
         if (!wrapperRef.current || !canvasContainerRef.current) return;
         
         const canvasContainer = canvasContainerRef.current;
-        const THREE = await import(/* @vite-ignore */ 'three');
+        const THREE = await import('three');
         
         if (!isMounted) return;
 

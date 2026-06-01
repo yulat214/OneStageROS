@@ -51,20 +51,8 @@ export function useWorldManager(scene: THREE.Scene | null) {
     if (!scene) return;
     const ext = url.split('.').pop()?.toLowerCase();
     const fileName = url.split('/').pop() || 'Unknown Model';
-    let loader: any;
-    
-    if (ext === 'dae') {
-      const { ColladaLoader } = await import('three/addons/loaders/ColladaLoader.js');
-      loader = new ColladaLoader();
-    } else if (ext === 'glb' || ext === 'gltf') {
-      const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
-      loader = new GLTFLoader();
-    }
-    
-    if (!loader) return;
 
-    loader.load(url, (result: any) => {
-      const mesh = ext === 'dae' ? result.scene : result.scene;
+    const onLoad = (mesh: THREE.Object3D) => {
       mesh.position.set(pos[0], pos[1], pos[2]);
       mesh.rotation.set(rot[0], rot[1], rot[2]);
 
@@ -74,21 +62,34 @@ export function useWorldManager(scene: THREE.Scene | null) {
           child.receiveShadow = true;
         }
       });
-      
+
       scene.add(mesh);
-      
-      // ★ ID付きで状態に追加
+
       const newObj: EnvObject = {
-        id: crypto.randomUUID(), 
+        id: crypto.randomUUID(),
         name: fileName,
-        mesh: mesh,
+        mesh,
         sourceUrl: url,
         position: pos,
         rotation: rot
       };
-      
+
       setObstacles((prev) => [...prev, newObj]);
-    });
+    };
+
+    if (ext === 'dae') {
+      const { ColladaLoader } = await import('three/addons/loaders/ColladaLoader.js');
+      new ColladaLoader().load(url, (result: any) => onLoad(result.scene));
+    } else if (ext === 'glb' || ext === 'gltf') {
+      const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
+      new GLTFLoader().load(url, (result: any) => onLoad(result.scene));
+    } else if (ext === 'stl') {
+      const { STLLoader } = await import('three/addons/loaders/STLLoader.js');
+      new STLLoader().load(url, (geometry: THREE.BufferGeometry) => {
+        const material = new THREE.MeshPhongMaterial({ color: 0x888888 });
+        onLoad(new THREE.Mesh(geometry, material));
+      });
+    }
   }, [scene]);
 
   const exportEnvironment = useCallback(() => {

@@ -6,6 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { spawn } = require('child_process');
+const xml2js = require('xml2js');
 
 const app = express();
 const PORT = 8000;

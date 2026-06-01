@@ -68,14 +68,14 @@ function ServerFileBrowser({ onClose, onSelectFile }: { onClose: () => void, onS
   };
 
   return (
-    <div className="absolute inset-0 z-50 bg-black/40 backdrop-blur-sm">
-      <div className="bg-white dark:bg-gray-800 w-96 rounded-xl shadow-2xl flex flex-col overflow-hidden border border-gray-200 dark:border-gray-700">
-      
-        <div className="p-2 bg-gray-100 dark:bg-gray-900 text-[10px] text-gray-500 truncate">
+    <div className="absolute inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center">
+      <div className="bg-white dark:bg-gray-800 w-96 max-h-[70vh] rounded-xl shadow-2xl flex flex-col overflow-hidden border border-gray-200 dark:border-gray-700">
+
+        <div className="p-2 bg-gray-100 dark:bg-gray-900 text-[10px] text-gray-500 truncate flex-shrink-0">
           Current: /{currentPath}
         </div>
 
-        <div className="h-full overflow-y-auto p-2">
+        <div className="flex-1 min-h-0 overflow-y-auto p-2">
           {loading ? (
             <div className="text-center py-4 text-gray-500">Loading...</div>
           ) : (
@@ -112,11 +112,35 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   const [isBrowserOpen, setIsBrowserOpen] = useState(false); 
   const [isObjectListOpen, setIsObjectListOpen] = useState(false); // 個別削除メニューの開閉状態
 
-  const { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan } = useROS(jointTopic); 
+  const { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan } = useROS(jointTopic);
   const { obstacles, addWorldModel, removeObjectById, clearObstacles, exportEnvironment, loadEnvironment } = useWorldManager(scene);
   const { simulateLidar } = useLidarSim();
 
   const currentPoseRef = useRef({ x: 0, y: 0, yaw: 0 });
+  const [isPaused, setIsPaused] = useState(false);
+  const isPausedRef = useRef(false);
+
+  const STORAGE_POSE_KEY = 'onestage_ros_pose';
+  const STORAGE_ENV_KEY = 'onestage_ros_environment';
+  const isRestoringRef = useRef(false);
+  const obstaclesInitRef = useRef(true);
+
+  const togglePause = () => {
+    isPausedRef.current = !isPausedRef.current;
+    setIsPaused(isPausedRef.current);
+  };
+
+  const resetPose = () => {
+    currentPoseRef.current = { x: 0, y: 0, yaw: 0 };
+    cmdVelRef.current = { linearX: 0, angularZ: 0 };
+    isPausedRef.current = false;
+    setIsPaused(false);
+    const urdfElement = viewerRef.current as any;
+    if (urdfElement?.robot) {
+      urdfElement.robot.position.set(0, 0, 0);
+      urdfElement.robot.rotation.z = 0;
+    }
+  };
 
   const handleServerFileSelect = (filePath: string) => {
     setIsBrowserOpen(false);
@@ -149,12 +173,12 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   useEffect(() => {
     const initViewer = async () => {
       try {
-        const THREE = await import(/* @vite-ignore */ 'three') as typeof import('three');
-        const { STLLoader } = await import(/* @vite-ignore */ 'three/addons/loaders/STLLoader.js');
-        const { GLTFLoader } = await import(/* @vite-ignore */ 'three/addons/loaders/GLTFLoader.js');
-        const { ColladaLoader } = await import(/* @vite-ignore */ 'three/addons/loaders/ColladaLoader.js');
-        const { OBJLoader } = await import(/* @vite-ignore */ 'three/addons/loaders/OBJLoader.js');
-        const customElementModule = await import(/* @vite-ignore */ '/src/urdf-loader/urdf-manipulator-element.js');
+        const THREE = await import('three') as typeof import('three');
+        const { STLLoader } = await import('three/addons/loaders/STLLoader.js');
+        const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
+        const { ColladaLoader } = await import('three/addons/loaders/ColladaLoader.js');
+        const { OBJLoader } = await import('three/addons/loaders/OBJLoader.js');
+        const customElementModule = await import('../urdf-loader/urdf-manipulator-element.js');
         
         if (!customElements.get('urdf-viewer')) {
           customElements.define('urdf-viewer', customElementModule.default);
@@ -217,6 +241,50 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     initViewer();
   }, [onSceneReady]);
 
+  // シーン準備完了時に保存済み状態を復元する
+  useEffect(() => {
+    if (!isLoaded) return;
+
+    try {
+      const raw = localStorage.getItem(STORAGE_POSE_KEY);
+      if (raw) currentPoseRef.current = JSON.parse(raw);
+    } catch {}
+
+    (async () => {
+      try {
+        const raw = localStorage.getItem(STORAGE_ENV_KEY);
+        if (raw) {
+          isRestoringRef.current = true;
+          await loadEnvironment(JSON.parse(raw));
+          isRestoringRef.current = false;
+        }
+      } catch {
+        isRestoringRef.current = false;
+      }
+    })();
+  }, [isLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ポーズを1秒ごとに自動保存
+  useEffect(() => {
+    const id = setInterval(() => {
+      localStorage.setItem(STORAGE_POSE_KEY, JSON.stringify(currentPoseRef.current));
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // 障害物が変化するたびに環境を自動保存（初回・復元中はスキップ）
+  useEffect(() => {
+    if (obstaclesInitRef.current) { obstaclesInitRef.current = false; return; }
+    if (isRestoringRef.current) return;
+    localStorage.setItem(STORAGE_ENV_KEY, JSON.stringify({
+      objects: obstacles.map(obj => ({
+        name: obj.name,
+        uri: obj.sourceUrl,
+        pose: [...obj.position, ...obj.rotation]
+      }))
+    }));
+  }, [obstacles]);
+
   useEffect(() => {
     if (!scene) return;
 
@@ -238,15 +306,17 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
         const urdfElement = viewerRef.current as any;
         
         if (urdfElement?.robot) {
-            const { linearX, angularZ } = cmdVelRef.current;
-            const pose = currentPoseRef.current;
+            if (!isPausedRef.current) {
+                const { linearX, angularZ } = cmdVelRef.current;
+                const pose = currentPoseRef.current;
 
-            pose.yaw += angularZ * dt;
-            pose.x += linearX * Math.cos(pose.yaw) * dt;
-            pose.y += linearX * Math.sin(pose.yaw) * dt;
+                pose.yaw += angularZ * dt;
+                pose.x += linearX * Math.cos(pose.yaw) * dt;
+                pose.y += linearX * Math.sin(pose.yaw) * dt;
 
-            urdfElement.robot.position.set(pose.x, pose.y, 0);
-            urdfElement.robot.rotation.z = pose.yaw;
+                urdfElement.robot.position.set(pose.x, pose.y, 0);
+                urdfElement.robot.rotation.z = pose.yaw;
+            }
 
             if (urdfElement.robot.joints && needsUpdateRef.current) {
                 jointPositionsRef.current.forEach((position, name) => {
@@ -278,7 +348,23 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
       <div className="bg-gray-100 dark:bg-gray-700 px-4 py-2 border-b border-gray-300 dark:border-gray-600 flex justify-between items-center z-20">
         <h2 className="text-sm font-medium text-gray-700 dark:text-gray-300">メインシミュレータビュー</h2>
         <div className="flex gap-3 items-center">
-          <button 
+          <button
+            onClick={togglePause}
+            className={`text-xs px-3 py-1.5 rounded shadow-sm font-medium transition-colors ${
+              isPaused
+                ? 'bg-green-500 hover:bg-green-600 text-white'
+                : 'bg-yellow-500 hover:bg-yellow-600 text-white'
+            }`}
+          >
+            {isPaused ? '▶ 再開' : '⏸ 停止'}
+          </button>
+          <button
+            onClick={resetPose}
+            className="text-xs bg-gray-500 hover:bg-gray-600 text-white px-3 py-1.5 rounded shadow-sm font-medium transition-colors"
+          >
+            ↩ リセット
+          </button>
+          <button
             onClick={exportEnvironment}
             className="text-xs bg-blue-500 hover:bg-blue-600 text-white px-3 py-1.5 rounded shadow-sm flex items-center transition-colors"
           >
