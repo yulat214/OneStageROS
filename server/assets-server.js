@@ -121,6 +121,102 @@ app.post('/api/file', (req, res) => {
     }
 });
 
+// --- ビルド API ---
+
+let currentBuildProcess = null;
+
+function stripAnsi(str) {
+    return str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+function expandWorkspacePath(p) {
+    if (!p) return path.join(os.homedir(), 'ros2_ws');
+    if (p === '~' || p.startsWith('~/')) return path.join(os.homedir(), p.slice(p === '~' ? 1 : 2));
+    return getSafeAbsolutePath(p);
+}
+
+app.get('/api/build', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    const sendEvent = (type, text) => {
+        res.write(`data: ${JSON.stringify({ type, text })}\n\n`);
+    };
+    const sendExit = (code) => {
+        res.write(`data: ${JSON.stringify({ type: 'exit', code })}\n\n`);
+        res.end();
+    };
+
+    let workspacePath;
+    try {
+        workspacePath = expandWorkspacePath(req.query.workspace);
+        assertWithinWorkspace(workspacePath);
+    } catch (e) {
+        sendEvent('error', `ワークスペースエラー: ${e.message}`);
+        sendExit(1);
+        return;
+    }
+
+    if (!fs.existsSync(workspacePath)) {
+        sendEvent('error', `ワークスペースが見つかりません: ${workspacePath}\n~/ros2_ws など正しいパスを指定してください。`);
+        sendExit(1);
+        return;
+    }
+
+    if (currentBuildProcess) {
+        currentBuildProcess.kill('SIGINT');
+        currentBuildProcess = null;
+    }
+
+    const args = ['build'];
+    if (req.query.symlink === 'true') args.push('--symlink-install');
+    if (req.query.packages) {
+        const pkgs = req.query.packages.split(',').map(s => s.trim()).filter(Boolean);
+        if (pkgs.length > 0) args.push('--packages-select', ...pkgs);
+    }
+
+    sendEvent('system', `$ colcon ${args.join(' ')}\n作業ディレクトリ: ${workspacePath}\n`);
+
+    const proc = spawn('colcon', args, {
+        cwd: workspacePath,
+        env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1', TERM: 'dumb' }
+    });
+    currentBuildProcess = proc;
+
+    proc.stdout.on('data', (d) => sendEvent('stdout', stripAnsi(d.toString())));
+    proc.stderr.on('data', (d) => sendEvent('stderr', stripAnsi(d.toString())));
+
+    proc.on('error', (err) => {
+        currentBuildProcess = null;
+        const msg = err.code === 'ENOENT'
+            ? 'colcon が見つかりません。ROS 2 環境がセットアップされているか確認してください。'
+            : err.message;
+        sendEvent('error', msg);
+        sendExit(1);
+    });
+
+    proc.on('close', (code) => {
+        currentBuildProcess = null;
+        sendExit(code ?? 1);
+    });
+
+    req.on('close', () => {
+        if (proc && !proc.killed) proc.kill('SIGINT');
+    });
+});
+
+app.post('/api/build/cancel', (req, res) => {
+    if (currentBuildProcess) {
+        currentBuildProcess.kill('SIGINT');
+        currentBuildProcess = null;
+        res.json({ cancelled: true });
+    } else {
+        res.json({ cancelled: false });
+    }
+});
+
 // --- 静的ファイル配信 ---
 const staticOptions = {
     setHeaders: (res, filePath) => {
@@ -164,8 +260,52 @@ const server = app.listen(PORT, () => {
     console.log(`Editor Root: ${WORKSPACE_ROOT}`);
 });
 
+// --- ターミナル WebSocket ---
+const { WebSocketServer } = require('ws');
+const pty = require('node-pty');
+
+const ALLOWED_ORIGINS = ['http://localhost:3000', 'http://127.0.0.1:3000'];
+const wss = new WebSocketServer({ server, path: '/terminal' });
+
+wss.on('connection', (ws, req) => {
+    const origin = req.headers.origin || '';
+    if (!ALLOWED_ORIGINS.includes(origin)) {
+        ws.close(1008, 'Forbidden');
+        return;
+    }
+
+    const shell = process.env.SHELL || '/bin/bash';
+    const ptyProc = pty.spawn(shell, [], {
+        name: 'xterm-256color',
+        cols: 80,
+        rows: 24,
+        cwd: os.homedir(),
+        env: process.env,
+    });
+
+    ptyProc.onData(data => {
+        if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'output', data }));
+    });
+
+    ws.on('message', (raw) => {
+        try {
+            const { type, data, cols, rows } = JSON.parse(raw.toString());
+            if (type === 'input') ptyProc.write(data);
+            if (type === 'resize') ptyProc.resize(Math.max(1, cols), Math.max(1, rows));
+        } catch {}
+    });
+
+    ws.on('close', () => { try { ptyProc.kill(); } catch {} });
+    ptyProc.onExit(() => { if (ws.readyState === 1) ws.close(); });
+});
+
+console.log('Terminal WebSocket: ws://localhost:' + PORT + '/terminal');
+
+// ===================================================
+
 process.on('SIGINT', () => {
     console.log('\nShutting down all services...');
     runningProcesses.forEach(proc => proc.kill('SIGINT'));
+    wss.close();
     server.close(() => process.exit(0));
 });

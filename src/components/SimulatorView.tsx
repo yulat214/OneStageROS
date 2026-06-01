@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { X } from 'lucide-react';
 import type * as THREE from 'three';
 import { useROS } from '../hooks/useROS';
 import { useWorldManager } from '../hooks/useWorldManager'; 
@@ -68,11 +69,18 @@ function ServerFileBrowser({ onClose, onSelectFile }: { onClose: () => void, onS
   };
 
   return (
-    <div className="absolute inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center">
-      <div className="bg-white dark:bg-gray-800 w-96 h-[70vh] rounded-xl shadow-2xl flex flex-col overflow-hidden border border-gray-200 dark:border-gray-700">
+    <div className="absolute inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center" onClick={onClose}>
+      <div className="bg-white dark:bg-gray-800 w-96 h-[70vh] rounded-xl shadow-2xl flex flex-col overflow-hidden border border-gray-200 dark:border-gray-700" onClick={e => e.stopPropagation()}>
 
-        <div className="p-2 bg-gray-100 dark:bg-gray-900 text-[10px] text-gray-500 truncate flex-shrink-0">
-          Current: /{currentPath}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
+          <span className="font-medium text-sm text-gray-800 dark:text-gray-100">配置するオブジェクトを選択</span>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 rounded p-0.5 transition-colors">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="px-3 py-1 bg-gray-50 dark:bg-gray-900 text-[10px] text-gray-400 truncate flex-shrink-0">
+          /{currentPath}
         </div>
 
         <div className="flex-1 min-h-0 overflow-y-auto p-2">

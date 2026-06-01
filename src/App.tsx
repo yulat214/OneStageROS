@@ -4,23 +4,32 @@ import { SimulatorView } from './components/SimulatorView';
 import { RobotCameraView } from './components/RobotCameraView';
 import { DebugLog } from './components/DebugLog';
 import { CodeEditor } from './components/CodeEditor';
-import { FileExplorer } from './components/FileExplorer'; // ★新規追加
-import { MonitorPlay, Code2 } from 'lucide-react';
+import { FileExplorer } from './components/FileExplorer';
+import { BuildPanel } from './components/BuildPanel';
+import { TerminalPanel } from './components/TerminalPanel';
+import { MonitorPlay, Code2, Terminal } from 'lucide-react';
 
 type TabType = 'simulator' | 'editor';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>('simulator');
-  
-  // SimulatorViewからシーンを受け取り、RobotCameraViewへ渡すためのState
   const [sharedScene, setSharedScene] = useState<THREE.Scene | null>(null);
-
-  // ★変更: エディターで現在開いているファイルのパスを保持するState
   const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
+
+  // ターミナル
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  const [terminalMounted, setTerminalMounted] = useState(false);
+  const [terminalHeight, setTerminalHeight] = useState(280);
+
+  const openTerminal = () => {
+    setTerminalMounted(true);
+    setTerminalOpen(true);
+  };
+  const closeTerminal = () => setTerminalOpen(false);
 
   return (
     <div className="h-screen flex flex-col bg-gray-50 text-gray-900 overflow-hidden">
-      
+
       {/* 1. タブナビゲーション */}
       <nav className="bg-white border-b border-gray-200 flex-shrink-0 shadow-sm z-10">
         <div className="flex px-4 h-14 items-end gap-2">
@@ -29,7 +38,7 @@ export default function App() {
             className={`
               flex items-center gap-2 px-6 py-3 text-base font-medium rounded-t-lg transition-all duration-200 border-t border-l border-r -mb-px
               ${activeTab === 'simulator'
-                ? 'bg-white border-gray-200 text-blue-600 border-b-white' 
+                ? 'bg-white border-gray-200 text-blue-600 border-b-white'
                 : 'bg-gray-50 border-transparent text-gray-500 hover:text-gray-800 hover:bg-gray-100 border-b-gray-200'
               }
             `}
@@ -37,7 +46,7 @@ export default function App() {
             <MonitorPlay className="w-5 h-5" />
             シミュレータ
           </button>
-          
+
           <button
             onClick={() => setActiveTab('editor')}
             className={`
@@ -51,28 +60,37 @@ export default function App() {
             <Code2 className="w-5 h-5" />
             エディター
           </button>
+
+          {/* ターミナルトグルボタン（右端・タブと底面を揃える） */}
+          <div className="ml-auto self-end mb-1.5 flex-shrink-0">
+            <button
+              onClick={terminalOpen ? closeTerminal : openTerminal}
+              className={`flex items-center gap-2 px-4 py-2 text-base font-medium rounded-lg border transition-colors ${
+                terminalOpen
+                  ? 'bg-gray-800 text-white border-gray-800'
+                  : 'bg-gray-100 text-gray-700 border-gray-300 hover:bg-gray-200 hover:text-gray-900'
+              }`}
+            >
+              <Terminal className="w-5 h-5" />
+              ターミナル
+            </button>
+          </div>
         </div>
       </nav>
 
       {/* 2. メインコンテンツエリア */}
       <main className="flex-1 flex flex-col p-4 min-h-0">
-        
+
         {activeTab === 'simulator' ? (
           // === シミュレータモード ===
           <div className="flex-1 flex flex-col md:flex-row gap-4 min-h-0">
-            {/* 左側：メインシミュレータビュー */}
-            <div className="flex-1 md:max-w-[60%] flex flex-col min-h-0 min-w-0 bg-white rounded-lg border border-gray-200 shadow-sm ">
+            <div className="flex-1 md:max-w-[60%] flex flex-col min-h-0 min-w-0 bg-white rounded-lg border border-gray-200 shadow-sm">
               <SimulatorView onSceneReady={setSharedScene} />
             </div>
-
-            {/* 右側：カメラビュー & デバッグログ */}
             <aside className="flex flex-col md:flex-1 gap-4 min-h-0">
-              {/* ロボットカメラビュー：flex-1 */}
               <div className="flex-1 min-h-[250px] bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
                 <RobotCameraView scene={sharedScene} />
               </div>
-
-              {/* デバッグログ：flex-1 */}
               <div className="flex-1 min-h-[250px] bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
                 <DebugLog />
               </div>
@@ -80,21 +98,31 @@ export default function App() {
           </div>
         ) : (
           <div className="flex-1 flex flex-row gap-4 min-h-0">
-            {/* 左側: ファイルツリー (幅250px固定) */}
             <div className="w-[250px] flex-shrink-0 bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden flex flex-col">
-              <FileExplorer 
-                selectedPath={activeFilePath || undefined} 
-                onFileSelect={(path) => setActiveFilePath(path)} 
+              <FileExplorer
+                selectedPath={activeFilePath || undefined}
+                onFileSelect={(path) => setActiveFilePath(path)}
               />
             </div>
-
-            {/* 右側: エディター本体 */}
-            <div className="flex-1 bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden flex flex-col">
-              <CodeEditor filePath={activeFilePath} />
+            <div className="flex-1 bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden flex flex-col min-h-0">
+              <div className="flex-1 min-h-0 overflow-hidden">
+                <CodeEditor filePath={activeFilePath} />
+              </div>
+              <BuildPanel />
             </div>
           </div>
         )}
       </main>
+
+      {/* 3. ターミナルパネル（両タブ共通・画面下部固定） */}
+      {terminalMounted && (
+        <TerminalPanel
+          isOpen={terminalOpen}
+          height={terminalHeight}
+          onClose={closeTerminal}
+          onHeightChange={setTerminalHeight}
+        />
+      )}
     </div>
   );
 }
