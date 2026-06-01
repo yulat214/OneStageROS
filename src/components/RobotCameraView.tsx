@@ -1,19 +1,65 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Video } from 'lucide-react';
+import * as ROSLIB from 'roslib';
 import type * as THREE from 'three';
+
+// /camera/color/camera_info が取得できない場合のフォールバック比率（640×480）
+const DEFAULT_ASPECT = 640 / 480;
 
 interface RobotCameraViewProps {
   scene: THREE.Scene | null;
 }
 
 export function RobotCameraView({ scene }: RobotCameraViewProps) {
-  // サイズを測るための外枠
   const wrapperRef = useRef<HTMLDivElement>(null);
-  // Three.jsを差し込むためのコンテナ
   const canvasContainerRef = useRef<HTMLDivElement>(null);
 
-  const targetLinkName = "imu_link"; 
+  const cameraAspectRef = useRef(DEFAULT_ASPECT);
+  const applyResizeRef = useRef<(() => void) | null>(null);
+  // camera_info の frame_id または自動探索で確定したリンク名（空 = 未確定）
+  const targetLinkRef = useRef<string>('');
 
+  const [cameraResolution, setCameraResolution] = useState<string>('640×480');
+  const [targetLinkDisplay, setTargetLinkDisplay] = useState<string>('検出中...');
+
+  // /camera/color/camera_info を一度だけ購読してアスペクト比とフレーム名を取得
+  useEffect(() => {
+    const hostname = window.location.hostname;
+    const ros = new ROSLIB.Ros({ url: `ws://${hostname}:9090` });
+
+    const topic = new ROSLIB.Topic({
+      ros,
+      name: '/camera/color/camera_info',
+      messageType: 'sensor_msgs/msg/CameraInfo',
+    });
+
+    const handleMsg = (msg: any) => {
+      const w: number = msg.width;
+      const h: number = msg.height;
+      const frameId: string = msg.header?.frame_id ?? '';
+
+      if (w > 0 && h > 0) {
+        cameraAspectRef.current = w / h;
+        setCameraResolution(`${w}×${h}`);
+        if (frameId) {
+          targetLinkRef.current = frameId;
+          setTargetLinkDisplay(frameId);
+        }
+        applyResizeRef.current?.();
+        topic.unsubscribe();
+        ros.close();
+      }
+    };
+
+    topic.subscribe(handleMsg);
+
+    return () => {
+      topic.unsubscribe();
+      ros.close();
+    };
+  }, []);
+
+  // ─── レンダラー・カメラ初期化 ───
   useEffect(() => {
     let isMounted = true;
     let renderer: THREE.WebGLRenderer | null = null;
@@ -22,97 +68,123 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
     let resizeObserver: ResizeObserver | null = null;
 
     const initRobotCamera = async () => {
-        if (!wrapperRef.current || !canvasContainerRef.current) return;
-        
-        const canvasContainer = canvasContainerRef.current;
-        const THREE = await import('three');
-        
-        if (!isMounted) return;
+      if (!wrapperRef.current || !canvasContainerRef.current) return;
 
-        // --- 1. 初期化 ---
-        // サイズはCSSで勝手に決まるので、解像度の初期値は何でも良い
-        camera = new THREE.PerspectiveCamera(60, 4 / 3, 0.01, 100);
-        camera.position.set(0.5, 0, 0.5);
-        camera.lookAt(0, 0, 0);
+      const canvasContainer = canvasContainerRef.current;
+      const THREE = await import('three');
 
-        renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
-        renderer.setPixelRatio(window.devicePixelRatio);
-        
-        // ★ここが重要：Canvasを親に合わせて無理やり広げる設定
-        // width/height: 100% にすることで、親のサイズに追従します
-        renderer.domElement.style.width = '100%';
-        renderer.domElement.style.height = '100%';
-        renderer.domElement.style.display = 'block';
+      if (!isMounted) return;
 
-        // 既存の中身をクリアして追加
-        while (canvasContainer.firstChild) {
-            canvasContainer.removeChild(canvasContainer.firstChild);
+      // --- 1. 初期化 ---
+      camera = new THREE.PerspectiveCamera(60, cameraAspectRef.current, 0.01, 100);
+      camera.position.set(0.5, 0, 0.5);
+      camera.lookAt(0, 0, 0);
+
+      renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+      renderer.setPixelRatio(window.devicePixelRatio);
+
+      renderer.domElement.style.width = '100%';
+      renderer.domElement.style.height = '100%';
+      renderer.domElement.style.display = 'block';
+
+      while (canvasContainer.firstChild) {
+        canvasContainer.removeChild(canvasContainer.firstChild);
+      }
+      canvasContainer.appendChild(renderer.domElement);
+
+      // --- 2. サイズ変更の監視 ---
+      const doResize = (width: number, height: number) => {
+        if (!renderer || !camera || !canvasContainerRef.current) return;
+        const aspect = cameraAspectRef.current;
+
+        let renderW: number, renderH: number;
+        if (width / height >= aspect) {
+          renderH = height;
+          renderW = height * aspect;
+        } else {
+          renderW = width;
+          renderH = width / aspect;
         }
-        canvasContainer.appendChild(renderer.domElement);
 
+        canvasContainerRef.current.style.width  = `${renderW}px`;
+        canvasContainerRef.current.style.height = `${renderH}px`;
+        renderer.setSize(renderW, renderH, false);
+        camera.aspect = aspect;
+        camera.updateProjectionMatrix();
+      };
 
-        // --- 2. サイズ変更の監視 ---
-        resizeObserver = new ResizeObserver((entries) => {
-            if (!isMounted || !renderer || !camera) return;
+      applyResizeRef.current = () => {
+        if (!wrapperRef.current) return;
+        const { width, height } = wrapperRef.current.getBoundingClientRect();
+        if (width > 0 && height > 0) doResize(width, height);
+      };
 
-            for (const entry of entries) {
-                const { width, height } = entry.contentRect;
-                if (width === 0 || height === 0) return;
+      resizeObserver = new ResizeObserver((entries) => {
+        if (!isMounted) return;
+        for (const entry of entries) {
+          const { width, height } = entry.contentRect;
+          if (width > 0 && height > 0) doResize(width, height);
+        }
+      });
 
-                // レンダラー（画質）のサイズを更新
-                renderer.setSize(width, height, false); // false: Canvasのstyle.width/heightを上書きしない
-                
-                // カメラのアスペクト比を更新（映像が伸びないように）
-                camera.aspect = width / height;
-                camera.updateProjectionMatrix();
-            }
-        });
-        
-        // 外枠（wrapper）を監視
-        resizeObserver.observe(wrapperRef.current);
+      resizeObserver.observe(wrapperRef.current);
 
+      // --- 3. 描画ループ ---
+      const targetPos = new THREE.Vector3();
+      const targetQuat = new THREE.Quaternion();
 
-        // --- 3. 描画ループ ---
-        const targetPos = new THREE.Vector3();
-        const targetQuat = new THREE.Quaternion();
+      const animate = () => {
+        if (!isMounted) return;
+        loopId = requestAnimationFrame(animate);
 
-        const animate = () => {
-            if (!isMounted) return;
-            loopId = requestAnimationFrame(animate);
+        if (renderer && scene && camera) {
+          let targetObject: THREE.Object3D | null | undefined = null;
 
-            if (renderer && scene && camera) {
-                const targetObject = scene.getObjectByName(targetLinkName);
-                if (targetObject) {
-                    targetObject.getWorldPosition(targetPos);
-                    targetObject.getWorldQuaternion(targetQuat);
-                    camera.position.copy(targetPos);
-                    camera.quaternion.copy(targetQuat);
-                    camera.rotateY(-Math.PI / 2); 
-                    camera.rotateZ(-Math.PI / 2);
-                    camera.translateZ(-0.1); 
-                }
-                renderer.render(scene, camera);
-            }
-        };
+          if (targetLinkRef.current) {
+            // camera_info または自動探索で確定済み
+            targetObject = scene.getObjectByName(targetLinkRef.current);
+          } else {
+            // まだ未確定: "optical" を含む最初のリンクを探索してキャッシュ
+            scene.traverse((obj) => {
+              if (!targetObject && obj.name?.toLowerCase().includes('optical')) {
+                targetObject = obj;
+                targetLinkRef.current = obj.name;
+                setTargetLinkDisplay(obj.name);
+              }
+            });
+          }
 
-        animate();
+          if (targetObject) {
+            targetObject.getWorldPosition(targetPos);
+            targetObject.getWorldQuaternion(targetQuat);
+            camera.position.copy(targetPos);
+            camera.quaternion.copy(targetQuat);
+            // ROS カメラ光学フレーム（+Z 前方, +Y 下）→ Three.js カメラ（-Z 前方, +Y 上）
+            camera.rotateX(Math.PI);
+          }
+          renderer.render(scene, camera);
+        }
+      };
+
+      animate();
     };
 
     if (scene) {
-        initRobotCamera();
+      initRobotCamera();
     }
 
     return () => {
-        isMounted = false;
-        if (loopId) cancelAnimationFrame(loopId);
-        if (resizeObserver) resizeObserver.disconnect();
-        if (renderer) {
-            renderer.dispose();
-            const canvas = renderer.domElement;
-            if (canvas && canvas.parentNode) {
-                canvas.parentNode.removeChild(canvas);
-            }
+      isMounted = false;
+      applyResizeRef.current = null;
+      if (loopId) cancelAnimationFrame(loopId);
+      if (resizeObserver) resizeObserver.disconnect();
+      if (renderer) {
+        renderer.dispose();
+        const canvas = renderer.domElement;
+        if (canvas && canvas.parentNode) {
+          canvas.parentNode.removeChild(canvas);
         }
+      }
     };
   }, [scene]);
 
@@ -126,27 +198,20 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
         </h2>
         <span className="ml-auto text-xs text-green-600 dark:text-green-400 flex items-center gap-1">
           <span className="w-2 h-2 bg-green-500 dark:bg-green-400 rounded-full animate-pulse"></span>
-          LIVE ({targetLinkName})
+          LIVE ({targetLinkDisplay}) {cameraResolution}
         </span>
       </div>
 
       {/* コンテンツエリア */}
-      {/* relative: これを基準にする */}
-      {/* flex-1 min-h-0: これで親の縮小に合わせて縮むようになる */}
       <div className="flex-1 p-4 min-h-0 bg-gray-50 dark:bg-gray-900 relative overflow-hidden">
-        
-        {/* 点線枠 (Wrapper) */}
-        {/* w-full h-full: 親に合わせて広がる */}
-        <div 
-            ref={wrapperRef}
-            className="w-full h-full border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg relative overflow-hidden"
+
+        {/* 点線枠 (Wrapper): flex で中央揃え、サイズ計算の基準 */}
+        <div
+          ref={wrapperRef}
+          className="w-full h-full border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg flex items-center justify-center overflow-hidden"
         >
-            {/* ★ここが最大のポイント: absolute inset-0
-               これにより、Canvasは「幽体」になり、親のサイズ計算に一切干渉しなくなります。
-               親が縮めば、文句を言わずに一緒に縮みます。
-            */}
-            <div ref={canvasContainerRef} className="absolute inset-0 w-full h-full bg-black" />
-            
+          {/* サイズは ResizeObserver が camera_info の比率で JS から設定する */}
+          <div ref={canvasContainerRef} className="bg-black" />
         </div>
 
       </div>
