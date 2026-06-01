@@ -56,11 +56,13 @@ app.get('/api/ls', (req, res) => {
         if (!fs.existsSync(absPath)) return res.status(404).json({ error: 'Directory not found' });
         assertWithinWorkspace(absPath);
         const items = fs.readdirSync(absPath, { withFileTypes: true });
-        const result = items.map(item => ({
-            name: item.name,
-            isDirectory: item.isDirectory(),
-            path: req.query.path ? path.join(req.query.path, item.name) : item.name
-        }));
+        const result = items
+            .filter(item => !item.name.startsWith('.'))
+            .map(item => ({
+                name: item.name,
+                isDirectory: item.isDirectory(),
+                path: req.query.path ? path.join(req.query.path, item.name) : item.name
+            }));
         res.json(result);
     } catch (e) {
         res.status(e.status || 500).json({ error: e.message });

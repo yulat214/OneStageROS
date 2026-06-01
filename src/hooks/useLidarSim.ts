@@ -11,16 +11,18 @@ export function useLidarSim() {
     const minRange = 0.12;
     const ranges: number[] = [];
 
-    // ロボットの現在位置（LiDARの高さに合わせて少しZを上げる）
+    // ロボットの現在位置（Three.js world space は Y-up なので Y に高さを加算）
     const origin = new THREE.Vector3();
     robot.getWorldPosition(origin);
-    origin.z += 0.15; 
+    origin.y += 0.15;
 
     for (let i = 0; i < numRays; i++) {
       const angle = (i * Math.PI) / 180;
-      
+
+      // ロボット body frame (+X=前方, +Y=左, Z=上) でのレイ方向を
+      // robot.matrixWorld で world space に変換する（親の座標変換も含む）
       const direction = new THREE.Vector3(Math.cos(angle), Math.sin(angle), 0);
-      direction.applyQuaternion(robot.quaternion).normalize();
+      direction.transformDirection(robot.matrixWorld).normalize();
 
       raycaster.set(origin, direction);
       raycaster.near = minRange;
@@ -31,7 +33,7 @@ export function useLidarSim() {
       if (intersects.length > 0) {
         ranges.push(intersects[0].distance);
       } else {
-        ranges.push(0.0);
+        ranges.push(maxRange); // ヒットなし = range_max（Infinity は JSON で null になるため使用不可）
       }
     }
 

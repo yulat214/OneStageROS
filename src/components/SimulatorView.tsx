@@ -69,7 +69,7 @@ function ServerFileBrowser({ onClose, onSelectFile }: { onClose: () => void, onS
 
   return (
     <div className="absolute inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center">
-      <div className="bg-white dark:bg-gray-800 w-96 max-h-[70vh] rounded-xl shadow-2xl flex flex-col overflow-hidden border border-gray-200 dark:border-gray-700">
+      <div className="bg-white dark:bg-gray-800 w-96 h-[70vh] rounded-xl shadow-2xl flex flex-col overflow-hidden border border-gray-200 dark:border-gray-700">
 
         <div className="p-2 bg-gray-100 dark:bg-gray-900 text-[10px] text-gray-500 truncate flex-shrink-0">
           Current: /{currentPath}
@@ -326,6 +326,9 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
             }
 
             if (scanCounter++ % 3 === 0) {
+              // renderer.render() より前なので matrixWorld が古い。
+              // transformDirection が正しく動くよう事前に更新する。
+              urdfElement.robot.updateMatrixWorld(true);
               const meshList = obstacles.map(obj => obj.mesh);
               const scanData = simulateLidar(urdfElement.robot, meshList);
               publishScan(scanData);
