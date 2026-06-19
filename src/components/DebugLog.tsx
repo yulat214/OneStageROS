@@ -20,10 +20,22 @@ interface LogMessage {
   isTranslating?: boolean;
 }
 
+const ALL_LEVELS = ['DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL'] as const;
+type LevelName = typeof ALL_LEVELS[number];
+
+const LEVEL_COLORS: Record<LevelName, string> = {
+  DEBUG: 'bg-gray-200 text-gray-600 dark:bg-gray-700 dark:text-gray-300',
+  INFO:  'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300',
+  WARN:  'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300',
+  ERROR: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
+  FATAL: 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300',
+};
+
 export function DebugLog() {
   const [logs, setLogs] = useState<LogMessage[]>([]);
   const [expandedLogIds, setExpandedLogIds] = useState<Set<string>>(new Set());
-  
+  const [hiddenLevels, setHiddenLevels] = useState<Set<LevelName>>(new Set());
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const [isConnected, setIsConnected] = useState(false);
   const rosRef = useRef<ROSLIB.Ros | null>(null);
@@ -138,6 +150,15 @@ export function DebugLog() {
     }
   }, [logs.length]);
 
+  const toggleLevel = (level: LevelName) => {
+    setHiddenLevels(prev => {
+      const next = new Set(prev);
+      if (next.has(level)) next.delete(level);
+      else next.add(level);
+      return next;
+    });
+  };
+
   const toggleExpand = (id: string) => {
     setExpandedLogIds(prev => {
       const next = new Set(prev);
@@ -185,18 +206,40 @@ export function DebugLog() {
 
   return (
     <div className="h-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg overflow-hidden flex flex-col shadow-sm">
-      <div className="bg-gray-100 dark:bg-gray-700 px-4 py-2 border-b border-gray-300 dark:border-gray-600 flex items-center gap-2 flex-shrink-0">
-        <Terminal className="w-4 h-4 text-purple-600 dark:text-purple-400" />
-        <h2 className="text-sm text-gray-700 dark:text-gray-300">
-          デバッグログ 
-          {isConnected ? <span className="text-xs ml-2 text-green-500">● 接続中</span> : <span className="text-xs ml-2 text-red-500">● 未接続</span>}
-        </h2>
-        <button 
-          onClick={() => { setLogs([]); setExpandedLogIds(new Set()); }}
-          className="ml-auto p-1 hover:bg-gray-200 dark:hover:bg-gray-600 rounded transition-colors"
-        >
-          <Trash2 className="w-3.5 h-3.5 text-gray-500 dark:text-gray-400" />
-        </button>
+      <div className="bg-gray-100 dark:bg-gray-700 px-3 py-1.5 border-b border-gray-300 dark:border-gray-600 flex flex-col gap-1 flex-shrink-0">
+        <div className="flex items-center gap-2">
+          <Terminal className="w-4 h-4 text-purple-600 dark:text-purple-400 flex-shrink-0" />
+          <h2 className="text-sm text-gray-700 dark:text-gray-300">
+            デバッグログ
+            {isConnected ? <span className="text-xs ml-2 text-green-500">● 接続中</span> : <span className="text-xs ml-2 text-red-500">● 未接続</span>}
+          </h2>
+          <button
+            onClick={() => { setLogs([]); setExpandedLogIds(new Set()); }}
+            className="ml-auto p-1 hover:bg-gray-200 dark:hover:bg-gray-600 rounded transition-colors"
+          >
+            <Trash2 className="w-3.5 h-3.5 text-gray-500 dark:text-gray-400" />
+          </button>
+        </div>
+        {/* レベル別フィルタボタン */}
+        <div className="flex gap-1 items-center">
+          {ALL_LEVELS.map(level => (
+            <button
+              key={level}
+              onClick={() => toggleLevel(level)}
+              className={`text-[10px] px-2 py-0.5 rounded font-bold transition-opacity border border-transparent ${LEVEL_COLORS[level]} ${hiddenLevels.has(level) ? 'opacity-30' : 'opacity-100'}`}
+            >
+              {level}
+            </button>
+          ))}
+          {hiddenLevels.size > 0 && (
+            <button
+              onClick={() => setHiddenLevels(new Set())}
+              className="text-[10px] px-2 py-0.5 rounded text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 ml-1"
+            >
+              全表示
+            </button>
+          )}
+        </div>
       </div>
       
       <div ref={scrollRef} className="flex-1 overflow-auto p-2 min-h-0 bg-gray-50 dark:bg-gray-900 font-mono text-xs">
@@ -204,7 +247,7 @@ export function DebugLog() {
           <div className="text-gray-400 dark:text-gray-500 mt-4 text-center py-4 italic">ログ待機中...</div>
         ) : (
           <div className="space-y-1">
-            {logs.map((log) => {
+            {logs.filter(log => !hiddenLevels.has(getLogStyle(log.level).label as LevelName)).map((log) => {
               const style = getLogStyle(log.level);
               const isExpanded = expandedLogIds.has(log.id);
               const hasSnapshot = !!log.snapshot;

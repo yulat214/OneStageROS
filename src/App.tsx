@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useLayoutEffect } from 'react';
 import type * as THREE from 'three';
 import { SimulatorView } from './components/SimulatorView';
 import { RobotCameraView } from './components/RobotCameraView';
@@ -7,7 +7,7 @@ import { CodeEditor } from './components/CodeEditor';
 import { FileExplorer } from './components/FileExplorer';
 import { BuildPanel } from './components/BuildPanel';
 import { TerminalPanel } from './components/TerminalPanel';
-import { MonitorPlay, Code2, Terminal } from 'lucide-react';
+import { MonitorPlay, Code2, Terminal, Moon, Sun } from 'lucide-react';
 
 type TabType = 'simulator' | 'editor';
 
@@ -15,6 +15,12 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>('simulator');
   const [sharedScene, setSharedScene] = useState<THREE.Scene | null>(null);
   const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
+  const [isDark, setIsDark] = useState(() => localStorage.getItem('theme') === 'dark');
+
+  useLayoutEffect(() => {
+    document.documentElement.classList.toggle('dark', isDark);
+    localStorage.setItem('theme', isDark ? 'dark' : 'light');
+  }, [isDark]);
 
   // ターミナル
   const [terminalOpen, setTerminalOpen] = useState(false);
@@ -61,14 +67,21 @@ export default function App() {
             エディター
           </button>
 
-          {/* ターミナルトグルボタン（右端・タブと底面を揃える） */}
-          <div className="ml-auto self-end mb-1.5 flex-shrink-0">
+          {/* 右端ボタン群（ダークモード + ターミナル） */}
+          <div className="ml-auto self-end mb-1.5 flex-shrink-0 flex items-center gap-2">
+            <button
+              onClick={() => setIsDark(prev => !prev)}
+              className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg border transition-colors bg-gray-100 text-gray-700 border-gray-300 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:border-gray-600 dark:hover:bg-gray-700"
+              title={isDark ? 'ライトモードに切り替え' : 'ダークモードに切り替え'}
+            >
+              {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+            </button>
             <button
               onClick={terminalOpen ? closeTerminal : openTerminal}
               className={`flex items-center gap-2 px-4 py-2 text-base font-medium rounded-lg border transition-colors ${
                 terminalOpen
                   ? 'bg-gray-800 text-white border-gray-800'
-                  : 'bg-gray-100 text-gray-700 border-gray-300 hover:bg-gray-200 hover:text-gray-900'
+                  : 'bg-gray-100 text-gray-700 border-gray-300 hover:bg-gray-200 hover:text-gray-900 dark:bg-gray-800 dark:text-gray-200 dark:border-gray-600 dark:hover:bg-gray-700'
               }`}
             >
               <Terminal className="w-5 h-5" />

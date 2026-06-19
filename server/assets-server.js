@@ -84,22 +84,169 @@ app.get('/api/file', (req, res) => {
 });
 
 app.get('/api/convert-sdf', async (req, res) => {
-    const sdfPath = path.join(WORKSPACE_ROOT, req.query.path);
-    const xml = fs.readFileSync(sdfPath, 'utf-8');
-    
-    const parser = new xml2js.Parser();
-    const result = await parser.parseStringPromise(xml);
+    try {
+        if (!req.query.path) return res.status(400).json({ error: 'path パラメータが必要です' });
 
-    const world = result.sdf.world[0];
-    const models = world.model.map(m => {
-        return {
-            name: m.$.name,
-            uri: m.link[0].visual[0].geometry[0].mesh[0].uri[0], // meshのパス
-            pose: m.pose[0].split(' ').map(Number) // [x, y, z, roll, pitch, yaw]
-        };
-    });
+        // パストラバーサル対策（シンボリックリンクも含めて解決）
+        const sdfPath = path.resolve(WORKSPACE_ROOT, req.query.path.replace(/^\/+/, ''));
+        if (!fs.existsSync(sdfPath)) return res.status(404).json({ error: 'ファイルが見つかりません' });
 
-    res.json({ objects: models });
+        // model:// URI 解決用ディレクトリリスト（GAZEBO_MODEL_PATH + 既定パス）
+        const GAZEBO_SEARCH_DIRS = [
+            ...(process.env.GAZEBO_MODEL_PATH || '').split(':').filter(Boolean),
+            '/usr/share/gazebo/models',
+            '/usr/share/gazebo-11/models',
+            '/usr/share/gazebo-9/models',
+        ];
+
+        function resolveModelUri(uri) {
+            if (!uri) return null;
+            if (uri.startsWith('file://')) return uri.replace('file://', '');
+            if (uri.startsWith('model://')) {
+                const rest = uri.replace('model://', '');
+                const slashIdx = rest.indexOf('/');
+                const modelName = slashIdx >= 0 ? rest.slice(0, slashIdx) : rest;
+                const subPath  = slashIdx >= 0 ? rest.slice(slashIdx + 1) : '';
+                for (const dir of GAZEBO_SEARCH_DIRS) {
+                    const candidate = path.join(dir, modelName, subPath);
+                    if (fs.existsSync(candidate)) return candidate;
+                }
+            }
+            return null;
+        }
+
+        function absToUrl(absPath) {
+            const real = path.resolve(absPath);
+            if (real.startsWith(WORKSPACE_ROOT)) return '/workspace' + real.slice(WORKSPACE_ROOT.length);
+            return null;
+        }
+
+        function parsePose(raw) {
+            if (!raw) return [0, 0, 0, 0, 0, 0];
+            const nums = String(raw).trim().split(/\s+/).map(Number);
+            while (nums.length < 6) nums.push(0);
+            return nums;
+        }
+
+        function addPose(a, b) {
+            return [a[0]+b[0], a[1]+b[1], a[2]+b[2], a[3]+b[3], a[4]+b[4], a[5]+b[5]];
+        }
+
+        const objects = [];
+
+        // 単一リンク配列 + 親ポーズ → visuals を objects に追加
+        function extractVisuals(linkArr, parentPose, modelName) {
+            const links = Array.isArray(linkArr) ? linkArr : (linkArr ? [linkArr] : []);
+            for (const link of links) {
+                const linkPose = parsePose(link.pose?.[0]);
+                const base = addPose(parentPose, linkPose);
+                for (const visual of (link.visual || [])) {
+                    const vPose = parsePose(visual.pose?.[0]);
+                    const pose  = addPose(base, vPose);
+                    const vName = visual.$?.name || 'visual';
+                    const geo   = visual.geometry?.[0];
+                    if (!geo) continue;
+
+                    if (geo.mesh) {
+                        const uri = geo.mesh[0].uri?.[0];
+                        const abs = resolveModelUri(uri);
+                        const url = abs ? absToUrl(abs) : null;
+                        const scaleStr = geo.mesh[0].scale?.[0] ?? '1 1 1';
+                        const scale = String(scaleStr).trim().split(/\s+/).map(Number);
+                        if (url) objects.push({ type: 'mesh', name: `${modelName}/${vName}`, url, scale, pose });
+                    } else if (geo.cylinder) {
+                        objects.push({
+                            type: 'cylinder', name: `${modelName}/${vName}`, pose,
+                            radius: parseFloat(geo.cylinder[0].radius?.[0] ?? 0.1),
+                            length: parseFloat(geo.cylinder[0].length?.[0] ?? 0.5),
+                        });
+                    } else if (geo.box) {
+                        objects.push({
+                            type: 'box', name: `${modelName}/${vName}`, pose,
+                            size: (geo.box[0].size?.[0] ?? '1 1 1').trim().split(/\s+/).map(Number),
+                        });
+                    } else if (geo.sphere) {
+                        objects.push({
+                            type: 'sphere', name: `${modelName}/${vName}`, pose,
+                            radius: parseFloat(geo.sphere[0].radius?.[0] ?? 0.5),
+                        });
+                    }
+                }
+            }
+        }
+
+        // model 要素を再帰的に処理（<include> 対応）
+        function processModel(m, parentPose) {
+            const mPose = parsePose(m.pose?.[0]);
+            const pose  = addPose(parentPose || [0,0,0,0,0,0], mPose);
+            const mName = m.$?.name || 'model';
+            if (m.link) extractVisuals(m.link, pose, mName);
+            for (const inc of (m.include || [])) {
+                processInclude(inc, pose);
+            }
+        }
+
+        // <include> の model:// を解決して再帰パース
+        function processInclude(inc, parentPose) {
+            const uri  = inc.uri?.[0];
+            const pose = addPose(parsePose(inc.pose?.[0]), parentPose || [0,0,0,0,0,0]);
+            if (!uri?.startsWith('model://')) return;
+            const modelName = uri.replace('model://', '');
+            // ground_plane / sun はスキップ
+            if (['ground_plane', 'sun'].includes(modelName)) return;
+
+            for (const dir of GAZEBO_SEARCH_DIRS) {
+                const modelDir = path.join(dir, modelName);
+                if (!fs.existsSync(modelDir)) continue;
+
+                // model.config から SDF ファイル名を取得
+                let sdfFile = 'model.sdf';
+                const configPath = path.join(modelDir, 'model.config');
+                if (fs.existsSync(configPath)) {
+                    try {
+                        const cfgXml = fs.readFileSync(configPath, 'utf-8');
+                        const m = cfgXml.match(/<sdf[^>]*>([^<]+)<\/sdf>/);
+                        if (m) sdfFile = m[1].trim();
+                    } catch { /* ignore */ }
+                }
+
+                const incSdfPath = path.join(modelDir, sdfFile);
+                if (!fs.existsSync(incSdfPath)) continue;
+                try {
+                    const incXml = fs.readFileSync(incSdfPath, 'utf-8');
+                    const parser2 = new xml2js.Parser();
+                    parser2.parseString(incXml, (err, r) => {
+                        if (err || !r?.sdf) return;
+                        if (r.sdf.model) {
+                            const m = Array.isArray(r.sdf.model) ? r.sdf.model[0] : r.sdf.model;
+                            processModel(m, pose);
+                        }
+                    });
+                } catch { /* ignore */ }
+                break;
+            }
+        }
+
+        // メインパース
+        const xml    = fs.readFileSync(sdfPath, 'utf-8');
+        const parser = new xml2js.Parser();
+        const parsed = await parser.parseStringPromise(xml);
+        const sdf    = parsed?.sdf;
+        if (!sdf) return res.status(400).json({ error: '有効な SDF ファイルではありません' });
+
+        if (sdf.world) {
+            const world = sdf.world[0];
+            for (const m   of (world.model   || [])) processModel(m, [0,0,0,0,0,0]);
+            for (const inc of (world.include  || [])) processInclude(inc, [0,0,0,0,0,0]);
+        } else if (sdf.model) {
+            const m = Array.isArray(sdf.model) ? sdf.model[0] : sdf.model;
+            processModel(m, [0,0,0,0,0,0]);
+        }
+
+        res.json({ objects });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.post('/api/file', (req, res) => {

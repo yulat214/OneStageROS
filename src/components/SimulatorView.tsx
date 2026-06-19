@@ -24,7 +24,17 @@ interface SimulatorViewProps {
 }
 
 // サーバー内のファイルを取得・表示するサブコンポーネント
-function ServerFileBrowser({ onClose, onSelectFile }: { onClose: () => void, onSelectFile: (path: string) => void }) {
+function ServerFileBrowser({
+  onClose,
+  onSelectFile,
+  title = '配置するオブジェクトを選択',
+  acceptExtensions = ['stl', 'dae', 'glb', 'gltf'],
+}: {
+  onClose: () => void;
+  onSelectFile: (path: string) => void;
+  title?: string;
+  acceptExtensions?: string[];
+}) {
   const [currentPath, setCurrentPath] = useState('');
   const [items, setItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -54,10 +64,10 @@ function ServerFileBrowser({ onClose, onSelectFile }: { onClose: () => void, onS
       fetchFiles(item.path);
     } else {
       const ext = item.name.split('.').pop()?.toLowerCase();
-      if (['stl', 'dae', 'glb', 'gltf'].includes(ext || '')) {
+      if (acceptExtensions.includes(ext || '')) {
         onSelectFile(item.path);
       } else {
-        alert('配置できるのは3Dモデル形式（.stl, .dae, .glb, .gltf）のみです。');
+        alert(`選択できる形式は ${acceptExtensions.join(', ')} のみです。`);
       }
     }
   };
@@ -73,7 +83,7 @@ function ServerFileBrowser({ onClose, onSelectFile }: { onClose: () => void, onS
       <div className="bg-white dark:bg-gray-800 w-96 h-[70vh] rounded-xl shadow-2xl flex flex-col overflow-hidden border border-gray-200 dark:border-gray-700" onClick={e => e.stopPropagation()}>
 
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
-          <span className="font-medium text-sm text-gray-800 dark:text-gray-100">配置するオブジェクトを選択</span>
+          <span className="font-medium text-sm text-gray-800 dark:text-gray-100">{title}</span>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 rounded p-0.5 transition-colors">
             <X className="w-4 h-4" />
           </button>
@@ -117,16 +127,20 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   const viewerRef = useRef<HTMLElement | null>(null);
   const [isLoaded, setIsLoaded] = useState(false);
   const [scene, setScene] = useState<THREE.Scene | null>(null); 
-  const [isBrowserOpen, setIsBrowserOpen] = useState(false); 
+  const [isBrowserOpen, setIsBrowserOpen] = useState(false);
+  const [isSdfBrowserOpen, setIsSdfBrowserOpen] = useState(false);
   const [isObjectListOpen, setIsObjectListOpen] = useState(false); // 個別削除メニューの開閉状態
 
-  const { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan } = useROS(jointTopic);
-  const { obstacles, addWorldModel, removeObjectById, clearObstacles, exportEnvironment, loadEnvironment } = useWorldManager(scene);
+  const { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, odomPoseRef } = useROS(jointTopic);
+  const { obstacles, addWorldModel, addBuiltMesh, removeObjectById, clearObstacles, exportEnvironment, loadEnvironment } = useWorldManager(scene);
   const { simulateLidar } = useLidarSim();
 
   const currentPoseRef = useRef({ x: 0, y: 0, yaw: 0 });
   const [isPaused, setIsPaused] = useState(false);
   const isPausedRef = useRef(false);
+  // Nav2 モード: true の時だけ /odom でロボット位置を上書きする
+  const [isNav2Mode, setIsNav2Mode] = useState(false);
+  const isNav2ModeRef = useRef(false);
 
   const STORAGE_POSE_KEY = 'onestage_ros_pose';
   const STORAGE_ENV_KEY = 'onestage_ros_environment';
@@ -150,6 +164,79 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     }
   };
 
+  const handleSdfFileSelect = async (filePath: string) => {
+    setIsSdfBrowserOpen(false);
+    const hostname = window.location.hostname;
+    try {
+      const res = await fetch(`http://${hostname}:8000/api/convert-sdf?path=${encodeURIComponent(filePath)}`);
+      const data = await res.json();
+      if (!res.ok) {
+        alert(`SDF 読み込みエラー: ${data.error || '不明なエラー'}`);
+        return;
+      }
+
+      const THREE = await import('three');
+      let loaded = 0;
+
+      for (const obj of data.objects ?? []) {
+        const [sx, sy, sz, , , yaw] = (obj.pose as number[]);
+        // SDF は Z-up (X=前, Y=左, Z=上)。Three.js は Y-up。
+        // scene.x = sdf.x, scene.y = sdf.z(高さ), scene.z = -sdf.y
+        const pos: [number, number, number] = [sx ?? 0, sz ?? 0, -(sy ?? 0)];
+        // yaw は Z-up の鉛直軸回転 → Three.js では Y 軸回転（符号反転）
+        const rotY = -(yaw ?? 0);
+
+        if (obj.type === 'mesh') {
+          const meshUrl = `http://${hostname}:8000${obj.url}`;
+          if (addWorldModel) {
+            // Z-up DAE を Y-up シーンに正立させる基底クォータニオン
+            const orientQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
+            // SDF yaw をシーン Y 軸回転として合成（プリミティブと同じ符号: rotY = -sdf_yaw）
+            const yawQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotY);
+            // yawQ * orientQ = 「先に正立、次に yaw 回転」
+            const finalQ = new THREE.Quaternion().multiplyQuaternions(yawQ, orientQ);
+            const euler = new THREE.Euler().setFromQuaternion(finalQ, 'XYZ');
+            addWorldModel(meshUrl, pos, [euler.x, euler.y, euler.z], (obj.scale as number[]) ?? [1, 1, 1]);
+            loaded++;
+          }
+        } else {
+          // プリミティブを生成して obstacles に登録（削除可能・復元可能にする）
+          let geo: import('three').BufferGeometry | null = null;
+          let primitiveUri = '';
+          if (obj.type === 'cylinder') {
+            const r = obj.radius as number, l = obj.length as number;
+            geo = new THREE.CylinderGeometry(r, r, l, 16);
+            primitiveUri = `primitive://cylinder?r=${r}&l=${l}`;
+          } else if (obj.type === 'box') {
+            // SDF size = [sx, sy, sz] (Z-up) → Three.js BoxGeometry(sx, sz, sy)
+            const [bx, by, bz] = obj.size as number[];
+            geo = new THREE.BoxGeometry(bx, bz, by);
+            primitiveUri = `primitive://box?x=${bx}&y=${bz}&z=${by}`;
+          } else if (obj.type === 'sphere') {
+            const r = obj.radius as number;
+            geo = new THREE.SphereGeometry(r, 16, 12);
+            primitiveUri = `primitive://sphere?r=${r}`;
+          }
+          if (geo && primitiveUri && addBuiltMesh) {
+            const mat  = new THREE.MeshPhongMaterial({ color: 0x8899aa });
+            const mesh = new THREE.Mesh(geo, mat);
+            addBuiltMesh(mesh, obj.name, pos, [0, rotY, 0], primitiveUri);
+            loaded++;
+          }
+        }
+      }
+
+      if (loaded === 0) {
+        alert('SDF から読み込める要素がありませんでした。\nmodel:// URI が GAZEBO_MODEL_PATH に含まれているか確認してください。');
+      } else {
+        console.log(`SDF: ${loaded} 個のオブジェクトを読み込みました`);
+      }
+    } catch (e) {
+      console.error(e);
+      alert('SDF の読み込みに失敗しました。');
+    }
+  };
+
   const handleServerFileSelect = (filePath: string) => {
     setIsBrowserOpen(false);
     const hostname = window.location.hostname;
@@ -162,20 +249,6 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     if (addWorldModel) {
       addWorldModel(fileUrl, [x || 0, y || 0, z || 0], [-Math.PI / 2, 0, 0]);
     }
-  };
-
-  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    const blobUrl = URL.createObjectURL(file);
-    const input = window.prompt("配置する座標を「X, Y, Z」のカンマ区切りで入力してください", "1.5, 0, 0");
-    
-    if (input && addWorldModel) {
-      const [x, y, z] = input.split(',').map(Number);
-      addWorldModel(blobUrl, [x || 0, y || 0, z || 0], [-Math.PI / 2, 0, 0]);
-    }
-    event.target.value = '';
   };
 
   useEffect(() => {
@@ -228,9 +301,18 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
             if (viewer.scene) {
                 clearInterval(checkScene);
                 viewer.scene.background = new THREE.Color('#d1d1d1');
-                const gridHelper = new THREE.GridHelper(5, 10);
+                // グリッド
+                const gridHelper = new THREE.GridHelper(20, 20);
                 gridHelper.position.y = -0.001;
                 viewer.scene.add(gridHelper);
+                // 不透明な地面（Y=0 より下を隠して「埋まり」を防ぐ）
+                const groundGeo = new THREE.PlaneGeometry(20, 20);
+                const groundMat = new THREE.MeshLambertMaterial({ color: 0xe8e8e8 });
+                const ground = new THREE.Mesh(groundGeo, groundMat);
+                ground.rotation.x = -Math.PI / 2;
+                ground.position.y = -0.002;
+                ground.receiveShadow = true;
+                viewer.scene.add(ground);
                 if (viewer.camera) {
                     viewer.camera.position.set(0.4, 0.4, 0.4);
                     viewer.camera.lookAt(0, 0, 0);
@@ -288,7 +370,8 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
       objects: obstacles.map(obj => ({
         name: obj.name,
         uri: obj.sourceUrl,
-        pose: [...obj.position, ...obj.rotation]
+        pose: [...obj.position, ...obj.rotation],
+        ...(obj.meshScale ? { scale: obj.meshScale } : {}),
       }))
     }));
   }, [obstacles]);
@@ -315,15 +398,25 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
         
         if (urdfElement?.robot) {
             if (!isPausedRef.current) {
-                const { linearX, angularZ } = cmdVelRef.current;
-                const pose = currentPoseRef.current;
+                const odom = odomPoseRef.current;
+                const useOdom = isNav2ModeRef.current
+                    && odom !== null
+                    && (Date.now() - odom.time) < 2000;
 
-                pose.yaw += angularZ * dt;
-                pose.x += linearX * Math.cos(pose.yaw) * dt;
-                pose.y += linearX * Math.sin(pose.yaw) * dt;
+                if (useOdom) {
+                    currentPoseRef.current.x = odom.x;
+                    currentPoseRef.current.y = odom.y;
+                    currentPoseRef.current.yaw = odom.yaw;
+                } else {
+                    const { linearX, angularZ } = cmdVelRef.current;
+                    const pose = currentPoseRef.current;
+                    pose.yaw += angularZ * dt;
+                    pose.x += linearX * Math.cos(pose.yaw) * dt;
+                    pose.y += linearX * Math.sin(pose.yaw) * dt;
+                }
 
-                urdfElement.robot.position.set(pose.x, pose.y, 0);
-                urdfElement.robot.rotation.z = pose.yaw;
+                urdfElement.robot.position.set(currentPoseRef.current.x, currentPoseRef.current.y, 0);
+                urdfElement.robot.rotation.z = currentPoseRef.current.yaw;
             }
 
             if (urdfElement.robot.joints && needsUpdateRef.current) {
@@ -359,6 +452,20 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
       <div className="bg-gray-100 dark:bg-gray-700 px-4 py-2 border-b border-gray-300 dark:border-gray-600 flex justify-between items-center z-20">
         <h2 className="text-sm font-medium text-gray-700 dark:text-gray-300">メインシミュレータビュー</h2>
         <div className="flex gap-3 items-center">
+          <button
+            onClick={() => {
+              isNav2ModeRef.current = !isNav2ModeRef.current;
+              setIsNav2Mode(isNav2ModeRef.current);
+            }}
+            className={`text-xs px-3 py-1.5 rounded shadow-sm font-medium transition-colors ${
+              isNav2Mode
+                ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                : 'bg-gray-200 hover:bg-gray-300 text-gray-700 dark:bg-gray-600 dark:text-gray-200'
+            }`}
+            title="ON: /odom でロボット位置を同期（Nav2 使用時）&#10;OFF: cmd_vel デッドレコニング（手動操縦時）"
+          >
+            {isNav2Mode ? '📡 Nav2 ON' : '📡 Nav2 OFF'}
+          </button>
           <button
             onClick={togglePause}
             className={`text-xs px-3 py-1.5 rounded shadow-sm font-medium transition-colors ${
@@ -416,14 +523,21 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
         {/* メイン操作ボタン群（右上） */}
         <div className="absolute top-4 right-4 z-10 flex flex-col gap-2 items-end">
 
-          <button 
+          <button
             onClick={() => setIsBrowserOpen(prev => !prev)}
             className="bg-white hover:bg-gray-50 dark:bg-gray-700 dark:hover:bg-gray-600 border border-gray-200 dark:border-gray-600 text-gray-700 dark:text-gray-200 px-4 py-2 rounded shadow-md text-xs font-medium transition-colors"
           >
             {isBrowserOpen ? "✕ 一覧を閉じる" : "📂 配置するオブジェクトを選択"}
           </button>
 
-          <button 
+          <button
+            onClick={() => setIsSdfBrowserOpen(prev => !prev)}
+            className="bg-white hover:bg-gray-50 dark:bg-gray-700 dark:hover:bg-gray-600 border border-gray-200 dark:border-gray-600 text-gray-700 dark:text-gray-200 px-4 py-2 rounded shadow-md text-xs font-medium transition-colors"
+          >
+            {isSdfBrowserOpen ? "✕ SDF を閉じる" : "🌍 SDF ワールドを読み込む"}
+          </button>
+
+          <button
             onClick={() => setIsObjectListOpen(prev => !prev)}
             className={`px-4 py-2 rounded shadow-md text-xs font-medium transition-colors border ${
               isObjectListOpen 
@@ -468,11 +582,21 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
           </div>
         )}
 
-        {/* サーバーファイルブラウザ（オーバーレイ） */}
+        {/* サーバーファイルブラウザ（3D オブジェクト） */}
         {isBrowserOpen && (
-          <ServerFileBrowser 
-            onClose={() => setIsBrowserOpen(false)} 
-            onSelectFile={handleServerFileSelect} 
+          <ServerFileBrowser
+            onClose={() => setIsBrowserOpen(false)}
+            onSelectFile={handleServerFileSelect}
+          />
+        )}
+
+        {/* SDF ワールドファイルブラウザ */}
+        {isSdfBrowserOpen && (
+          <ServerFileBrowser
+            onClose={() => setIsSdfBrowserOpen(false)}
+            onSelectFile={handleSdfFileSelect}
+            title="SDF ワールドファイルを選択（.sdf / .world / .model / model.sdf）"
+            acceptExtensions={['sdf', 'world', 'model']}
           />
         )}
 
