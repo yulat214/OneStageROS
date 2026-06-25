@@ -10,6 +10,7 @@ const xml2js = require('xml2js');
 
 const app = express();
 const PORT = 8000;
+const SESSION_ID = Date.now().toString();
 
 const WORKSPACE_ROOT = fs.realpathSync(os.homedir());
 const ASSETS_DIR = path.join(__dirname, '../ros2_data');
@@ -249,6 +250,10 @@ app.get('/api/convert-sdf', async (req, res) => {
     }
 });
 
+app.get('/api/session', (req, res) => {
+    res.json({ sessionId: SESSION_ID });
+});
+
 app.post('/api/file', (req, res) => {
     try {
         const absPath = getSafeAbsolutePath(req.body.path);
@@ -262,6 +267,7 @@ app.post('/api/file', (req, res) => {
         // Post-mkdirSync re-check resolves any symlinks that may have been swapped in
         assertWithinWorkspace(dir);
         fs.writeFileSync(absPath, req.body.content, 'utf-8');
+        fs.chmodSync(absPath, 0o755);
         res.json({ success: true });
     } catch (e) {
         res.status(e.status || 500).json({ error: e.message });
@@ -358,6 +364,72 @@ app.post('/api/build/cancel', (req, res) => {
     if (currentBuildProcess) {
         currentBuildProcess.kill('SIGINT');
         currentBuildProcess = null;
+        res.json({ cancelled: true });
+    } else {
+        res.json({ cancelled: false });
+    }
+});
+
+// --- 実行 API ---
+
+let currentRunProcess = null;
+
+app.get('/api/run', (req, res) => {
+    const cmd = req.query.cmd;
+    if (!cmd) {
+        res.status(400).json({ error: 'cmd パラメータが必要です' });
+        return;
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    const sendEvent = (type, text) => {
+        res.write(`data: ${JSON.stringify({ type, text })}\n\n`);
+    };
+    const sendExit = (code) => {
+        res.write(`data: ${JSON.stringify({ type: 'exit', code })}\n\n`);
+        res.end();
+    };
+
+    if (currentRunProcess) {
+        currentRunProcess.kill('SIGINT');
+        currentRunProcess = null;
+    }
+
+    sendEvent('system', `$ ${cmd}\n`);
+
+    const proc = spawn('bash', ['-c', cmd], {
+        cwd: os.homedir(),
+        env: { ...process.env }
+    });
+    currentRunProcess = proc;
+
+    proc.stdout.on('data', (d) => sendEvent('stdout', stripAnsi(d.toString())));
+    proc.stderr.on('data', (d) => sendEvent('stderr', stripAnsi(d.toString())));
+
+    proc.on('error', (err) => {
+        currentRunProcess = null;
+        sendEvent('error', err.message);
+        sendExit(1);
+    });
+
+    proc.on('close', (code) => {
+        currentRunProcess = null;
+        sendExit(code ?? 1);
+    });
+
+    req.on('close', () => {
+        if (proc && !proc.killed) proc.kill('SIGINT');
+    });
+});
+
+app.post('/api/run/cancel', (req, res) => {
+    if (currentRunProcess) {
+        currentRunProcess.kill('SIGINT');
+        currentRunProcess = null;
         res.json({ cancelled: true });
     } else {
         res.json({ cancelled: false });
