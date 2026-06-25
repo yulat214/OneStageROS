@@ -23,6 +23,11 @@ interface SimulatorViewProps {
   jointTopic?: string;
 }
 
+type PlacementKind =
+  | { type: 'primitive'; geoType: 'box' | 'cylinder' | 'sphere' }
+  | { type: 'sdf'; filePath: string }
+  | { type: 'mesh'; url: string };
+
 // サーバー内のファイルを取得・表示するサブコンポーネント
 function ServerFileBrowser({
   onClose,
@@ -127,8 +132,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   const viewerRef = useRef<HTMLElement | null>(null);
   const [isLoaded, setIsLoaded] = useState(false);
   const [scene, setScene] = useState<THREE.Scene | null>(null); 
-  const [isBrowserOpen, setIsBrowserOpen] = useState(false);
-  const [isSdfBrowserOpen, setIsSdfBrowserOpen] = useState(false);
+  const [isFileBrowserOpen, setIsFileBrowserOpen] = useState(false);
   const [isObjectListOpen, setIsObjectListOpen] = useState(false); // 個別削除メニューの開閉状態
 
   const { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, odomPoseRef } = useROS(jointTopic);
@@ -137,6 +141,14 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
 
   const currentPoseRef = useRef({ x: 0, y: 0, yaw: 0 });
   const [isPaused, setIsPaused] = useState(false);
+
+  // 配置モード（プリミティブ用カーソル追従）
+  const [placement, setPlacement] = useState<PlacementKind | null>(null);
+  const ghostRef = useRef<import('three').Object3D | null>(null);
+  const groundMeshRef = useRef<import('three').Mesh | null>(null);
+  const threeRef = useRef<typeof import('three') | null>(null);
+  const overlayPointerDownRef = useRef(false);
+  const placementEntryTimeRef = useRef(0);
   const isPausedRef = useRef(false);
   // Nav2 モード: true の時だけ /odom でロボット位置を上書きする
   const [isNav2Mode, setIsNav2Mode] = useState(false);
@@ -164,92 +176,298 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     }
   };
 
-  const handleSdfFileSelect = async (filePath: string) => {
-    setIsSdfBrowserOpen(false);
-    const hostname = window.location.hostname;
-    try {
-      const res = await fetch(`http://${hostname}:8000/api/convert-sdf?path=${encodeURIComponent(filePath)}`);
-      const data = await res.json();
-      if (!res.ok) {
-        alert(`SDF 読み込みエラー: ${data.error || '不明なエラー'}`);
-        return;
-      }
+  const enterPlacement = async (kind: PlacementKind) => {
+    const THREE = await import('three');
+    threeRef.current = THREE;
+    const viewer = viewerRef.current as any;
+    if (!viewer?.scene) return;
 
-      const THREE = await import('three');
-      let loaded = 0;
+    // 既存ゴーストを除去
+    if (ghostRef.current) {
+      viewer.scene.remove(ghostRef.current);
+      const g = ghostRef.current as any;
+      g.geometry?.dispose(); g.material?.dispose();
+      ghostRef.current = null;
+    }
 
-      for (const obj of data.objects ?? []) {
-        const [sx, sy, sz, , , yaw] = (obj.pose as number[]);
-        // SDF は Z-up (X=前, Y=左, Z=上)。Three.js は Y-up。
-        // scene.x = sdf.x, scene.y = sdf.z(高さ), scene.z = -sdf.y
-        const pos: [number, number, number] = [sx ?? 0, sz ?? 0, -(sy ?? 0)];
-        // yaw は Z-up の鉛直軸回転 → Three.js では Y 軸回転（符号反転）
-        const rotY = -(yaw ?? 0);
+    if (viewer.controls) viewer.controls.enabled = false;
+    overlayPointerDownRef.current = false;
+    const ghostMat = () => new THREE.MeshPhongMaterial({ color: 0x4488ff, opacity: 0.6, transparent: true });
 
-        if (obj.type === 'mesh') {
-          const meshUrl = `http://${hostname}:8000${obj.url}`;
-          if (addWorldModel) {
-            // Z-up DAE を Y-up シーンに正立させる基底クォータニオン
+    if (kind.type === 'primitive') {
+      const t = kind.geoType;
+      let geo: import('three').BufferGeometry;
+      if (t === 'box') geo = new THREE.BoxGeometry(1, 1, 1);
+      else if (t === 'cylinder') geo = new THREE.CylinderGeometry(0.3, 0.3, 0.5, 16);
+      else geo = new THREE.SphereGeometry(0.3, 16, 12);
+      const ghost = new THREE.Mesh(geo, ghostMat());
+      viewer.scene.add(ghost);
+      ghostRef.current = ghost;
+      setPlacement(kind);
+      placementEntryTimeRef.current = Date.now();
+    } else if (kind.type === 'mesh') {
+      // メッシュファイル: プレースホルダーを先に出し、実モデルを非同期ロードしてゴースト化
+      const placeholder = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, 0.3), ghostMat());
+      viewer.scene.add(placeholder);
+      ghostRef.current = placeholder;
+      setPlacement(kind);
+      placementEntryTimeRef.current = Date.now();
+
+      const applyMeshGhost = (loaded: import('three').Object3D) => {
+        if (!ghostRef.current) return;
+        loaded.rotation.set(-Math.PI / 2, 0, 0);
+        loaded.traverse((child: any) => { if (child.isMesh) child.material = ghostMat(); });
+        const parent = ghostRef.current.parent;
+        if (parent) {
+          const pos = ghostRef.current.position.clone();
+          parent.remove(ghostRef.current);
+          loaded.position.copy(pos);
+          parent.add(loaded);
+        }
+        ghostRef.current = loaded;
+      };
+
+      const ext = kind.url.split('.').pop()?.toLowerCase();
+      try {
+        if (ext === 'dae') {
+          const { ColladaLoader } = await import('three/addons/loaders/ColladaLoader.js');
+          new ColladaLoader().load(kind.url, (r: any) => applyMeshGhost(r.scene));
+        } else if (ext === 'glb' || ext === 'gltf') {
+          const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
+          new GLTFLoader().load(kind.url, (r: any) => applyMeshGhost(r.scene));
+        } else if (ext === 'stl') {
+          const { STLLoader } = await import('three/addons/loaders/STLLoader.js');
+          new STLLoader().load(kind.url, (geo: any) => applyMeshGhost(new THREE.Mesh(geo, ghostMat())));
+        } else if (ext === 'obj') {
+          const { OBJLoader } = await import('three/addons/loaders/OBJLoader.js');
+          new OBJLoader().load(kind.url, (obj: any) => applyMeshGhost(obj));
+        }
+      } catch { /* プレースホルダーのままにする */ }
+    } else {
+      // SDF / .model: まず軸+球インジケーター → バックグラウンドで実メッシュをロード
+      const group = new THREE.Group();
+      const indicatorSphere = new THREE.Mesh(new THREE.SphereGeometry(0.12, 16, 12), ghostMat());
+      group.add(indicatorSphere);
+      group.add(new THREE.AxesHelper(0.4));
+      viewer.scene.add(group);
+      ghostRef.current = group;
+      setPlacement(kind);
+      placementEntryTimeRef.current = Date.now();
+
+      try {
+        const hostname = window.location.hostname;
+        const res = await fetch(`http://${hostname}:8000/api/convert-sdf?path=${encodeURIComponent(kind.filePath)}`);
+        if (!res.ok || !ghostRef.current) return;
+        const data = await res.json();
+        if (!ghostRef.current) return;
+
+        let anyLoaded = false;
+        await Promise.all((data.objects ?? []).map(async (obj: any) => {
+          if (!ghostRef.current) return;
+          const [sx = 0, sy = 0, sz = 0, , , yaw = 0] = obj.pose as number[];
+          const relPos: [number, number, number] = [sx, sz, -sy];
+          const rotY = -yaw;
+
+          if (obj.type === 'mesh') {
+            const meshUrl = `http://${hostname}:8000${obj.url}`;
+            const ext = meshUrl.split('.').pop()?.toLowerCase();
             const orientQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
-            // SDF yaw をシーン Y 軸回転として合成（プリミティブと同じ符号: rotY = -sdf_yaw）
             const yawQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotY);
-            // yawQ * orientQ = 「先に正立、次に yaw 回転」
-            const finalQ = new THREE.Quaternion().multiplyQuaternions(yawQ, orientQ);
-            const euler = new THREE.Euler().setFromQuaternion(finalQ, 'XYZ');
-            addWorldModel(meshUrl, pos, [euler.x, euler.y, euler.z], (obj.scale as number[]) ?? [1, 1, 1]);
-            loaded++;
+            const euler = new THREE.Euler().setFromQuaternion(
+              new THREE.Quaternion().multiplyQuaternions(yawQ, orientQ), 'XYZ'
+            );
+
+            const addToGroup = (loaded: THREE.Object3D) => {
+              if (!ghostRef.current) return;
+              loaded.position.set(...relPos);
+              loaded.rotation.set(euler.x, euler.y, euler.z);
+              // ColladaLoader が単位変換スケールを持つため set ではなく *= で重ねる（addWorldModel と同じ挙動）
+              const sc = obj.scale ?? [1, 1, 1];
+              loaded.scale.x *= sc[0];
+              loaded.scale.y *= sc[1];
+              loaded.scale.z *= sc[2];
+              loaded.traverse((c: any) => { if (c.isMesh) c.material = ghostMat(); });
+              group.add(loaded);
+              anyLoaded = true;
+            };
+
+            try {
+              if (ext === 'dae') {
+                const { ColladaLoader } = await import('three/addons/loaders/ColladaLoader.js');
+                await new Promise<void>((ok, ng) => new ColladaLoader().load(meshUrl, r => { addToGroup(r.scene); ok(); }, undefined, ng));
+              } else if (ext === 'glb' || ext === 'gltf') {
+                const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
+                await new Promise<void>((ok, ng) => new GLTFLoader().load(meshUrl, r => { addToGroup(r.scene); ok(); }, undefined, ng));
+              } else if (ext === 'stl') {
+                const { STLLoader } = await import('three/addons/loaders/STLLoader.js');
+                await new Promise<void>((ok, ng) => new STLLoader().load(meshUrl, geo => { addToGroup(new THREE.Mesh(geo, ghostMat())); ok(); }, undefined, ng));
+              }
+            } catch { /* 個別メッシュ失敗は無視 */ }
+          } else {
+            let geo: THREE.BufferGeometry | null = null;
+            if (obj.type === 'cylinder') geo = new THREE.CylinderGeometry(obj.radius, obj.radius, obj.length, 16);
+            else if (obj.type === 'box') { const [bx, by, bz] = obj.size ?? [0.5, 0.5, 0.5]; geo = new THREE.BoxGeometry(bx, bz, by); }
+            else if (obj.type === 'sphere') geo = new THREE.SphereGeometry(obj.radius, 16, 12);
+            if (geo) {
+              const m = new THREE.Mesh(geo, ghostMat());
+              m.position.set(...relPos);
+              m.rotation.y = rotY;
+              group.add(m);
+              anyLoaded = true;
+            }
           }
-        } else {
-          // プリミティブを生成して obstacles に登録（削除可能・復元可能にする）
-          let geo: import('three').BufferGeometry | null = null;
-          let primitiveUri = '';
-          if (obj.type === 'cylinder') {
-            const r = obj.radius as number, l = obj.length as number;
-            geo = new THREE.CylinderGeometry(r, r, l, 16);
-            primitiveUri = `primitive://cylinder?r=${r}&l=${l}`;
-          } else if (obj.type === 'box') {
-            // SDF size = [sx, sy, sz] (Z-up) → Three.js BoxGeometry(sx, sz, sy)
-            const [bx, by, bz] = obj.size as number[];
-            geo = new THREE.BoxGeometry(bx, bz, by);
-            primitiveUri = `primitive://box?x=${bx}&y=${bz}&z=${by}`;
-          } else if (obj.type === 'sphere') {
-            const r = obj.radius as number;
-            geo = new THREE.SphereGeometry(r, 16, 12);
-            primitiveUri = `primitive://sphere?r=${r}`;
-          }
-          if (geo && primitiveUri && addBuiltMesh) {
-            const mat  = new THREE.MeshPhongMaterial({ color: 0x8899aa });
-            const mesh = new THREE.Mesh(geo, mat);
-            addBuiltMesh(mesh, obj.name, pos, [0, rotY, 0], primitiveUri);
+        }));
+
+        // 実形状が1つでも読み込めたら球インジケーターを除去
+        if (anyLoaded && ghostRef.current) group.remove(indicatorSphere);
+      } catch { /* SDF解析失敗 → 球インジケーターのまま */ }
+    }
+  };
+
+  const exitPlacement = useCallback(() => {
+    const viewer = viewerRef.current as any;
+    if (ghostRef.current && viewer?.scene) {
+      viewer.scene.remove(ghostRef.current);
+      ghostRef.current.traverse((child: any) => {
+        child.geometry?.dispose();
+        if (Array.isArray(child.material)) child.material.forEach((m: any) => m.dispose());
+        else child.material?.dispose();
+      });
+      ghostRef.current = null;
+    }
+    if (viewer?.controls) viewer.controls.enabled = true;
+    setPlacement(null);
+  }, []);
+
+  const handlePlacementMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!ghostRef.current || !threeRef.current || !groundMeshRef.current) return;
+    const THREE = threeRef.current;
+    const viewer = viewerRef.current as any;
+    if (!viewer?.camera) return;
+
+    const rect = e.currentTarget.getBoundingClientRect();
+    const nx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    const ny = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(new THREE.Vector2(nx, ny), viewer.camera);
+    const hits = raycaster.intersectObject(groundMeshRef.current);
+    if (hits.length > 0) {
+      const p = hits[0].point;
+      // シーン未追加（モデル非同期ロード後）なら初回ヒット時に追加
+      if (!ghostRef.current.parent) viewer.scene.add(ghostRef.current);
+      ghostRef.current.position.set(p.x, p.y, p.z);
+    }
+  }, []);
+
+  const handlePlacementClick = useCallback(async () => {
+    if (!placement || !ghostRef.current || !threeRef.current) return;
+    // 配置モード開始から500ms以内のクリックは無視（ファイル選択のダブルクリック対策）
+    if (Date.now() - placementEntryTimeRef.current < 500) return;
+    // オーバーレイ上で pointerdown が起きていない場合も無視
+    if (!overlayPointerDownRef.current) return;
+    overlayPointerDownRef.current = false;
+    const THREE = threeRef.current;
+    const p = ghostRef.current.position;
+
+    if (placement.type === 'primitive') {
+      const g = placement.geoType;
+      let geo: import('three').BufferGeometry;
+      let uri = '';
+      if (g === 'box') {
+        geo = new THREE.BoxGeometry(1, 1, 1);
+        uri = 'primitive://box?x=1&y=1&z=1';
+      } else if (g === 'cylinder') {
+        geo = new THREE.CylinderGeometry(0.3, 0.3, 0.5, 16);
+        uri = 'primitive://cylinder?r=0.3&l=0.5';
+      } else {
+        geo = new THREE.SphereGeometry(0.3, 16, 12);
+        uri = 'primitive://sphere?r=0.3';
+      }
+      addBuiltMesh(new THREE.Mesh(geo, new THREE.MeshPhongMaterial({ color: 0x8899aa })), g, [p.x, p.y, p.z], [0, 0, 0], uri);
+    } else if (placement.type === 'mesh') {
+      await addWorldModel(placement.url, [p.x, p.y, p.z], [-Math.PI / 2, 0, 0]);
+    } else {
+      // SDF モデルをクリック位置にオフセットして配置
+      exitPlacement(); // ゴーストを先に消す
+      const hostname = window.location.hostname;
+      try {
+        const res = await fetch(
+          `http://${hostname}:8000/api/convert-sdf?path=${encodeURIComponent(placement.filePath)}`
+        );
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'SDF読み込みエラー');
+        let loaded = 0;
+        for (const obj of (data.objects ?? [])) {
+          const [sx, sy, sz, , , yaw] = obj.pose as number[];
+          // SDF Z-up → Three.js Y-up 変換 + クリック位置オフセット
+          const pos: [number, number, number] = [
+            (sx ?? 0) + p.x,
+            (sz ?? 0) + p.y,
+            -(sy ?? 0) + p.z,
+          ];
+          const rotY = -(yaw ?? 0);
+          if (obj.type === 'mesh') {
+            const meshUrl = `http://${hostname}:8000${obj.url}`;
+            const orientQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
+            const yawQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotY);
+            const euler = new THREE.Euler().setFromQuaternion(
+              new THREE.Quaternion().multiplyQuaternions(yawQ, orientQ), 'XYZ'
+            );
+            addWorldModel(meshUrl, pos, [euler.x, euler.y, euler.z], obj.scale ?? [1, 1, 1]);
             loaded++;
+          } else {
+            let geo: import('three').BufferGeometry | null = null;
+            let uri = '';
+            if (obj.type === 'cylinder') {
+              const r = obj.radius as number, l = obj.length as number;
+              geo = new THREE.CylinderGeometry(r, r, l, 16);
+              uri = `primitive://cylinder?r=${r}&l=${l}`;
+            } else if (obj.type === 'box') {
+              const [bx, by, bz] = obj.size as number[];
+              geo = new THREE.BoxGeometry(bx, bz, by);
+              uri = `primitive://box?x=${bx}&y=${bz}&z=${by}`;
+            } else if (obj.type === 'sphere') {
+              const r = obj.radius as number;
+              geo = new THREE.SphereGeometry(r, 16, 12);
+              uri = `primitive://sphere?r=${r}`;
+            }
+            if (geo && uri) {
+              const mat = new THREE.MeshPhongMaterial({ color: 0x8899aa });
+              addBuiltMesh(new THREE.Mesh(geo, mat), obj.name, pos, [0, rotY, 0], uri);
+              loaded++;
+            }
           }
         }
+        if (loaded === 0) alert('SDF から配置できる要素がありませんでした。');
+      } catch (e) {
+        console.error(e);
+        alert('SDF の読み込みに失敗しました。');
       }
+      return; // exitPlacement は上で呼び済み
+    }
+    exitPlacement();
+  }, [placement, addBuiltMesh, addWorldModel, exitPlacement]);
 
-      if (loaded === 0) {
-        alert('SDF から読み込める要素がありませんでした。\nmodel:// URI が GAZEBO_MODEL_PATH に含まれているか確認してください。');
-      } else {
-        console.log(`SDF: ${loaded} 個のオブジェクトを読み込みました`);
-      }
-    } catch (e) {
-      console.error(e);
-      alert('SDF の読み込みに失敗しました。');
+  // ESC でキャンセル
+  useEffect(() => {
+    if (!placement) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') exitPlacement(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [placement, exitPlacement]);
+
+  const handleFileSelect = (filePath: string) => {
+    setIsFileBrowserOpen(false);
+    const ext = filePath.split('.').pop()?.toLowerCase() ?? '';
+    if (['sdf', 'world', 'model'].includes(ext)) {
+      enterPlacement({ type: 'sdf', filePath });
+    } else {
+      const hostname = window.location.hostname;
+      enterPlacement({ type: 'mesh', url: `http://${hostname}:8000/workspace/${filePath}` });
     }
   };
 
-  const handleServerFileSelect = (filePath: string) => {
-    setIsBrowserOpen(false);
-    const hostname = window.location.hostname;
-    const fileUrl = `http://${hostname}:8000/workspace/${filePath}`;
-    
-    const input = window.prompt("配置する座標を「X, Y, Z」のカンマ区切りで入力してください\n（例: ロボットの前方なら 1.5, 0, 0）", "1.5, 0, 0");
-    if (!input) return;
-
-    const [x, y, z] = input.split(',').map(Number);
-    if (addWorldModel) {
-      addWorldModel(fileUrl, [x || 0, y || 0, z || 0], [-Math.PI / 2, 0, 0]);
-    }
-  };
 
   useEffect(() => {
     const initViewer = async () => {
@@ -313,6 +531,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
                 ground.position.y = -0.002;
                 ground.receiveShadow = true;
                 viewer.scene.add(ground);
+                groundMeshRef.current = ground;
                 if (viewer.camera) {
                     viewer.camera.position.set(0.4, 0.4, 0.4);
                     viewer.camera.lookAt(0, 0, 0);
@@ -524,18 +743,25 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
         <div className="absolute top-4 right-4 z-10 flex flex-col gap-2 items-end">
 
           <button
-            onClick={() => setIsBrowserOpen(prev => !prev)}
+            onClick={() => setIsFileBrowserOpen(prev => !prev)}
             className="bg-white hover:bg-gray-50 dark:bg-gray-700 dark:hover:bg-gray-600 border border-gray-200 dark:border-gray-600 text-gray-700 dark:text-gray-200 px-4 py-2 rounded shadow-md text-xs font-medium transition-colors"
           >
-            {isBrowserOpen ? "✕ 一覧を閉じる" : "📂 配置するオブジェクトを選択"}
+            {isFileBrowserOpen ? "✕ ファイルを閉じる" : "📂 ファイルから配置"}
           </button>
 
-          <button
-            onClick={() => setIsSdfBrowserOpen(prev => !prev)}
-            className="bg-white hover:bg-gray-50 dark:bg-gray-700 dark:hover:bg-gray-600 border border-gray-200 dark:border-gray-600 text-gray-700 dark:text-gray-200 px-4 py-2 rounded shadow-md text-xs font-medium transition-colors"
-          >
-            {isSdfBrowserOpen ? "✕ SDF を閉じる" : "🌍 SDF ワールドを読み込む"}
-          </button>
+          {/* プリミティブ形状配置ボタン */}
+          <div className="flex gap-1">
+            {(['box', 'cylinder', 'sphere'] as const).map(g => (
+              <button
+                key={g}
+                onClick={() => enterPlacement({ type: 'primitive', geoType: g })}
+                title={`${g} を配置`}
+                className="bg-white hover:bg-gray-50 dark:bg-gray-700 dark:hover:bg-gray-600 border border-gray-200 dark:border-gray-600 text-gray-700 dark:text-gray-200 px-3 py-2 rounded shadow-md text-xs font-medium transition-colors"
+              >
+                {g === 'box' ? '□ Box' : g === 'cylinder' ? '⬭ Cyl' : '○ Sph'}
+              </button>
+            ))}
+          </div>
 
           <button
             onClick={() => setIsObjectListOpen(prev => !prev)}
@@ -582,22 +808,35 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
           </div>
         )}
 
-        {/* サーバーファイルブラウザ（3D オブジェクト） */}
-        {isBrowserOpen && (
+
+
+        {/* 統合ファイルブラウザ：SDF / mesh 両対応 */}
+        {isFileBrowserOpen && (
           <ServerFileBrowser
-            onClose={() => setIsBrowserOpen(false)}
-            onSelectFile={handleServerFileSelect}
+            onClose={() => setIsFileBrowserOpen(false)}
+            onSelectFile={handleFileSelect}
+            title="配置ファイルを選択（.sdf / .world / .model / .dae / .obj / .stl / .glb / .gltf）"
+            acceptExtensions={['sdf', 'world', 'model', 'dae', 'obj', 'stl', 'glb', 'gltf']}
           />
         )}
 
-        {/* SDF ワールドファイルブラウザ */}
-        {isSdfBrowserOpen && (
-          <ServerFileBrowser
-            onClose={() => setIsSdfBrowserOpen(false)}
-            onSelectFile={handleSdfFileSelect}
-            title="SDF ワールドファイルを選択（.sdf / .world / .model / model.sdf）"
-            acceptExtensions={['sdf', 'world', 'model']}
-          />
+        {/* 配置モードオーバーレイ */}
+        {placement && (
+          <>
+            <div className="absolute top-2 left-1/2 -translate-x-1/2 z-40 bg-blue-600 text-white text-xs px-4 py-1.5 rounded-full shadow-lg pointer-events-none select-none">
+              クリックで配置 / 右クリック・ESC でキャンセル
+              {placement.type === 'sdf' && ` — ${placement.filePath.split('/').pop()}`}
+              {placement.type === 'mesh' && ` — ${placement.url.split('/').pop()}`}
+              {placement.type === 'primitive' && ` — ${placement.geoType}`}
+            </div>
+            <div
+              className="absolute inset-0 z-30 cursor-crosshair"
+              onPointerDown={() => { overlayPointerDownRef.current = true; }}
+              onPointerMove={handlePlacementMove}
+              onClick={handlePlacementClick}
+              onContextMenu={e => { e.preventDefault(); exitPlacement(); }}
+            />
+          </>
         )}
 
         <urdf-viewer

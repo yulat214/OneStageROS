@@ -235,16 +235,28 @@ app.get('/api/convert-sdf', async (req, res) => {
         const sdf    = parsed?.sdf;
         if (!sdf) return res.status(400).json({ error: '有効な SDF ファイルではありません' });
 
+        let robotPose = null;
+
         if (sdf.world) {
             const world = sdf.world[0];
             for (const m   of (world.model   || [])) processModel(m, [0,0,0,0,0,0]);
-            for (const inc of (world.include  || [])) processInclude(inc, [0,0,0,0,0,0]);
+            for (const inc of (world.include  || [])) {
+                processInclude(inc, [0,0,0,0,0,0]);
+                // 最初の非静的 include の pose をロボット初期位置候補として収集
+                if (robotPose === null) {
+                    const uri = inc.uri?.[0] || '';
+                    const mName = uri.replace('model://', '');
+                    if (!['ground_plane', 'sun'].includes(mName) && inc.pose?.[0]) {
+                        robotPose = parsePose(inc.pose[0]);
+                    }
+                }
+            }
         } else if (sdf.model) {
             const m = Array.isArray(sdf.model) ? sdf.model[0] : sdf.model;
             processModel(m, [0,0,0,0,0,0]);
         }
 
-        res.json({ objects });
+        res.json({ objects, robotPose });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
