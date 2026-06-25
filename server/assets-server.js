@@ -388,6 +388,19 @@ app.post('/api/build/cancel', (req, res) => {
 
 // --- AI 解析 API ---
 
+// AIレスポンスのマークダウン記法を除去する
+function stripMarkdown(text) {
+    return text
+        .replace(/\*\*(.+?)\*\*/g, '$1')   // **太字** → 太字
+        .replace(/\*(.+?)\*/g, '$1')        // *斜体* → 斜体
+        .replace(/`{1,3}([^`]*)`{1,3}/g, '$1') // `コード` → コード
+        .replace(/^#{1,6}\s+/gm, '')        // ## 見出し → 見出し
+        .replace(/^\s*[-*+]\s/gm, '・')     // - 箇条書き → ・箇条書き
+        .replace(/^\s*\d+\.\s/gm, '・')     // 1. 番号付き → ・
+        .replace(/\n{3,}/g, '\n\n')         // 連続空行を詰める
+        .trim();
+}
+
 // .env を更新するユーティリティ（キーが既存なら上書き、なければ追加）
 function writeEnvVar(envPath, key, value) {
     let content = '';
@@ -436,10 +449,18 @@ app.post('/api/analyze-log', async (req, res) => {
     const model = process.env.AI_MODEL || 'llama-3.3-70b-versatile';
 
     const logText = logs.map(l => `[${l.level}] [${l.name}] ${l.msg}`).join('\n');
-    const systemPrompt = `あなたはROS 2の専門家です。以下のログを分析し、日本語で簡潔に答えてください。
-形式（マークダウン使用可）:
-**原因**: (1〜2行)
-**対処法**: (具体的なコマンドや手順を箇条書き)`;
+    const systemPrompt = `ROS 2のデバッグ専門家として、以下のログを読んで日本語で短く答えてください。
+
+ルール：
+- マークダウンや番号付きリストは使わない。装飾なしのプレーンテキストで書く
+- 英語はできるだけ日本語にする
+- 1文は30字以内を目安に、短く簡潔に
+- 原因は必ず1つだけ。複数列挙しない
+- 初心者向けのやさしい言葉で
+
+形式：
+推測される原因：（1〜2文）
+確認してほしいこと：（箇条書き、各項目1行）`;
 
     try {
         const r = await fetch(`${baseUrl}/chat/completions`, {
@@ -457,7 +478,8 @@ app.post('/api/analyze-log', async (req, res) => {
         });
         const data = await r.json();
         if (!r.ok) return res.status(r.status).json({ error: data.error?.message || 'AI APIエラー' });
-        res.json({ result: data.choices?.[0]?.message?.content || '解析結果が空でした' });
+        const raw = data.choices?.[0]?.message?.content || '解析結果が空でした';
+        res.json({ result: stripMarkdown(raw) });
     } catch (e) {
         res.status(500).json({ error: `接続エラー: ${e.message}` });
     }

@@ -56,6 +56,7 @@ export function DebugLog() {
   const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
   const [settingsForm, setSettingsForm] = useState({ baseUrl: '', apiKey: '', model: '' });
   const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsSaved, setSettingsSaved] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const [isConnected, setIsConnected] = useState(false);
@@ -165,7 +166,12 @@ export function DebugLog() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ baseUrl: settingsForm.baseUrl, apiKey: settingsForm.apiKey || undefined, model: settingsForm.model }),
       });
-      if (r.ok) { await fetchAiStatus(); setAiSettingsOpen(false); setSettingsForm(f => ({ ...f, apiKey: '' })); }
+      if (r.ok) {
+        await fetchAiStatus();
+        setSettingsForm(f => ({ ...f, apiKey: '' }));
+        setSettingsSaved(true);
+        setTimeout(() => setSettingsSaved(false), 2500);
+      }
     } finally { setSettingsSaving(false); }
   };
 
@@ -204,15 +210,15 @@ export function DebugLog() {
             <button
               onClick={() => setAiSettingsOpen(true)}
               title="AI解析設定"
-              className={`p-1 rounded transition-colors ${aiStatus?.configured ? 'text-green-500 hover:bg-gray-200 dark:hover:bg-gray-600' : 'text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-600'}`}
+              className={`p-1.5 rounded transition-colors ${aiStatus?.configured ? 'text-green-500 hover:bg-gray-200 dark:hover:bg-gray-600' : 'text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-600'}`}
             >
-              <BotMessageSquare className="w-3.5 h-3.5" />
+              <BotMessageSquare className="w-5 h-5" />
             </button>
             <button
               onClick={() => { setLogs([]); setExpandedLogIds(new Set()); }}
-              className="p-1 hover:bg-gray-200 dark:hover:bg-gray-600 rounded transition-colors"
+              className="p-1.5 hover:bg-gray-200 dark:hover:bg-gray-600 rounded transition-colors"
             >
-              <Trash2 className="w-3.5 h-3.5 text-gray-500 dark:text-gray-400" />
+              <Trash2 className="w-5 h-5 text-gray-500 dark:text-gray-400" />
             </button>
           </div>
         </div>
@@ -484,9 +490,13 @@ export function DebugLog() {
               <button
                 onClick={saveAiSettings}
                 disabled={settingsSaving || !settingsForm.baseUrl || !settingsForm.model}
-                className="w-full py-1.5 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white text-xs font-bold rounded transition-colors"
+                className={`w-full py-2 text-sm font-bold rounded transition-colors ${
+                  settingsSaved
+                    ? 'bg-green-500 text-white'
+                    : 'bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white'
+                }`}
               >
-                {settingsSaving ? '保存中...' : '保存'}
+                {settingsSaving ? '保存中...' : settingsSaved ? '✓ 保存しました' : '保存'}
               </button>
             </div>
           </div>
