@@ -149,6 +149,8 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   const threeRef = useRef<typeof import('three') | null>(null);
   const overlayPointerDownRef = useRef(false);
   const placementEntryTimeRef = useRef(0);
+  const placementYawRef = useRef(0);
+  const [placementYawDeg, setPlacementYawDeg] = useState(0);
   const isPausedRef = useRef(false);
   // Nav2 モード: true の時だけ /odom でロボット位置を上書きする
   const [isNav2Mode, setIsNav2Mode] = useState(false);
@@ -182,11 +184,18 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     const viewer = viewerRef.current as any;
     if (!viewer?.scene) return;
 
+    // ヤウをリセット
+    placementYawRef.current = 0;
+    setPlacementYawDeg(0);
+
     // 既存ゴーストを除去
     if (ghostRef.current) {
       viewer.scene.remove(ghostRef.current);
-      const g = ghostRef.current as any;
-      g.geometry?.dispose(); g.material?.dispose();
+      ghostRef.current.traverse((c: any) => {
+        c.geometry?.dispose();
+        if (Array.isArray(c.material)) c.material.forEach((m: any) => m.dispose());
+        else c.material?.dispose();
+      });
       ghostRef.current = null;
     }
 
@@ -206,25 +215,22 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
       setPlacement(kind);
       placementEntryTimeRef.current = Date.now();
     } else if (kind.type === 'mesh') {
-      // メッシュファイル: プレースホルダーを先に出し、実モデルを非同期ロードしてゴースト化
-      const placeholder = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, 0.3), ghostMat());
-      viewer.scene.add(placeholder);
-      ghostRef.current = placeholder;
+      // メッシュファイル: ラッパーGroupにプレースホルダーを入れ、ロード後に差し替え
+      // (ラッパーのrotation.yでヤウを制御し、内部メッシュのX回転と分離する)
+      const wrapper = new THREE.Group();
+      wrapper.add(new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, 0.3), ghostMat()));
+      viewer.scene.add(wrapper);
+      ghostRef.current = wrapper;
       setPlacement(kind);
       placementEntryTimeRef.current = Date.now();
 
       const applyMeshGhost = (loaded: import('three').Object3D) => {
         if (!ghostRef.current) return;
-        loaded.rotation.set(-Math.PI / 2, 0, 0);
+        loaded.rotation.set(-Math.PI / 2, 0, 0); // 向き補正は内部メッシュに閉じ込める
         loaded.traverse((child: any) => { if (child.isMesh) child.material = ghostMat(); });
-        const parent = ghostRef.current.parent;
-        if (parent) {
-          const pos = ghostRef.current.position.clone();
-          parent.remove(ghostRef.current);
-          loaded.position.copy(pos);
-          parent.add(loaded);
-        }
-        ghostRef.current = loaded;
+        // ラッパーのchildrenをプレースホルダーから実メッシュへ
+        while (ghostRef.current.children.length) ghostRef.current.remove(ghostRef.current.children[0]);
+        ghostRef.current.add(loaded);
       };
 
       const ext = kind.url.split('.').pop()?.toLowerCase();
@@ -339,6 +345,13 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     setPlacement(null);
   }, []);
 
+  const handlePlacementWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    placementYawRef.current -= e.deltaY * 0.004;
+    if (ghostRef.current) ghostRef.current.rotation.y = placementYawRef.current;
+    setPlacementYawDeg(Math.round(placementYawRef.current * (180 / Math.PI)));
+  }, []);
+
   const handlePlacementMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     if (!ghostRef.current || !threeRef.current || !groundMeshRef.current) return;
     const THREE = threeRef.current;
@@ -357,6 +370,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
       // シーン未追加（モデル非同期ロード後）なら初回ヒット時に追加
       if (!ghostRef.current.parent) viewer.scene.add(ghostRef.current);
       ghostRef.current.position.set(p.x, p.y, p.z);
+      ghostRef.current.rotation.y = placementYawRef.current;
     }
   }, []);
 
@@ -384,13 +398,19 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
         geo = new THREE.SphereGeometry(0.3, 16, 12);
         uri = 'primitive://sphere?r=0.3';
       }
-      addBuiltMesh(new THREE.Mesh(geo, new THREE.MeshPhongMaterial({ color: 0x8899aa })), g, [p.x, p.y, p.z], [0, 0, 0], uri);
+      addBuiltMesh(new THREE.Mesh(geo, new THREE.MeshPhongMaterial({ color: 0x8899aa })), g, [p.x, p.y, p.z], [0, placementYawRef.current, 0], uri);
     } else if (placement.type === 'mesh') {
-      await addWorldModel(placement.url, [p.x, p.y, p.z], [-Math.PI / 2, 0, 0]);
+      // ゴーストと同じ: userYaw × orientFix
+      const userYawQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), placementYawRef.current);
+      const orientQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
+      const euler = new THREE.Euler().setFromQuaternion(userYawQ.multiply(orientQ), 'XYZ');
+      await addWorldModel(placement.url, [p.x, p.y, p.z], [euler.x, euler.y, euler.z]);
     } else {
-      // SDF モデルをクリック位置にオフセットして配置
-      exitPlacement(); // ゴーストを先に消す
+      // SDF モデルをクリック位置にオフセット + userYaw で配置
+      exitPlacement();
       const hostname = window.location.hostname;
+      const userYaw = placementYawRef.current;
+      const cosY = Math.cos(userYaw), sinY = Math.sin(userYaw);
       try {
         const res = await fetch(
           `http://${hostname}:8000/api/convert-sdf?path=${encodeURIComponent(placement.filePath)}`
@@ -399,20 +419,23 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
         if (!res.ok) throw new Error(data.error || 'SDF読み込みエラー');
         let loaded = 0;
         for (const obj of (data.objects ?? [])) {
-          const [sx, sy, sz, , , yaw] = obj.pose as number[];
-          // SDF Z-up → Three.js Y-up 変換 + クリック位置オフセット
+          const [sx = 0, sy = 0, sz = 0, , , yaw = 0] = obj.pose as number[];
+          // SDF Z-up → Y-up 変換後の相対位置を userYaw で回転
+          const relX = sx, relZ = -sy;
           const pos: [number, number, number] = [
-            (sx ?? 0) + p.x,
-            (sz ?? 0) + p.y,
-            -(sy ?? 0) + p.z,
+            relX * cosY - relZ * sinY + p.x,
+            (sz) + p.y,
+            relX * sinY + relZ * cosY + p.z,
           ];
-          const rotY = -(yaw ?? 0);
+          const rotY = -yaw;
           if (obj.type === 'mesh') {
             const meshUrl = `http://${hostname}:8000${obj.url}`;
+            // userYaw × sdfYaw × orientFix
             const orientQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
-            const yawQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotY);
+            const sdfYawQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotY);
+            const userYawQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), userYaw);
             const euler = new THREE.Euler().setFromQuaternion(
-              new THREE.Quaternion().multiplyQuaternions(yawQ, orientQ), 'XYZ'
+              new THREE.Quaternion().multiplyQuaternions(userYawQ, sdfYawQ).multiply(orientQ), 'XYZ'
             );
             addWorldModel(meshUrl, pos, [euler.x, euler.y, euler.z], obj.scale ?? [1, 1, 1]);
             loaded++;
@@ -434,7 +457,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
             }
             if (geo && uri) {
               const mat = new THREE.MeshPhongMaterial({ color: 0x8899aa });
-              addBuiltMesh(new THREE.Mesh(geo, mat), obj.name, pos, [0, rotY, 0], uri);
+              addBuiltMesh(new THREE.Mesh(geo, mat), obj.name, pos, [0, rotY + userYaw, 0], uri);
               loaded++;
             }
           }
@@ -824,15 +847,17 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
         {placement && (
           <>
             <div className="absolute top-2 left-1/2 -translate-x-1/2 z-40 bg-blue-600 text-white text-xs px-4 py-1.5 rounded-full shadow-lg pointer-events-none select-none">
-              クリックで配置 / 右クリック・ESC でキャンセル
+              クリックで配置 / スクロールで回転 / 右クリック・ESC でキャンセル
               {placement.type === 'sdf' && ` — ${placement.filePath.split('/').pop()}`}
               {placement.type === 'mesh' && ` — ${placement.url.split('/').pop()}`}
               {placement.type === 'primitive' && ` — ${placement.geoType}`}
+              {` [${placementYawDeg}°]`}
             </div>
             <div
               className="absolute inset-0 z-30 cursor-crosshair"
               onPointerDown={() => { overlayPointerDownRef.current = true; }}
               onPointerMove={handlePlacementMove}
+              onWheel={handlePlacementWheel}
               onClick={handlePlacementClick}
               onContextMenu={e => { e.preventDefault(); exitPlacement(); }}
             />
