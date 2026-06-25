@@ -8,6 +8,10 @@ const os = require('os');
 const { spawn } = require('child_process');
 const xml2js = require('xml2js');
 
+// AI設定を server/.env から読み込む（gitignore済み）
+const AI_ENV_PATH = path.join(__dirname, '.env');
+try { require('dotenv').config({ path: AI_ENV_PATH }); } catch {}
+
 const app = express();
 const PORT = 8000;
 const SESSION_ID = Date.now().toString();
@@ -379,6 +383,83 @@ app.post('/api/build/cancel', (req, res) => {
         res.json({ cancelled: true });
     } else {
         res.json({ cancelled: false });
+    }
+});
+
+// --- AI 解析 API ---
+
+// .env を更新するユーティリティ（キーが既存なら上書き、なければ追加）
+function writeEnvVar(envPath, key, value) {
+    let content = '';
+    try { content = fs.readFileSync(envPath, 'utf-8'); } catch {}
+    const re = new RegExp(`^${key}=.*$`, 'm');
+    const line = `${key}=${value}`;
+    content = re.test(content) ? content.replace(re, line) : `${content}\n${line}`.trimStart();
+    fs.writeFileSync(envPath, content.trimEnd() + '\n');
+}
+
+// 現在のAI設定状態を返す（APIキーは含まない）
+app.get('/api/ai/status', (req, res) => {
+    res.json({
+        configured: !!process.env.AI_API_KEY,
+        baseUrl: process.env.AI_BASE_URL || 'https://api.groq.com/openai/v1',
+        model: process.env.AI_MODEL || 'llama-3.3-70b-versatile',
+    });
+});
+
+// AI設定を server/.env に保存（APIキーはサーバー側にだけ保持）
+app.post('/api/ai/settings', (req, res) => {
+    const { baseUrl, apiKey, model } = req.body || {};
+    if (!baseUrl || !model) return res.status(400).json({ error: 'baseUrl と model は必須です' });
+
+    writeEnvVar(AI_ENV_PATH, 'AI_BASE_URL', baseUrl);
+    writeEnvVar(AI_ENV_PATH, 'AI_MODEL', model);
+    if (apiKey) writeEnvVar(AI_ENV_PATH, 'AI_API_KEY', apiKey);
+
+    process.env.AI_BASE_URL = baseUrl;
+    process.env.AI_MODEL = model;
+    if (apiKey) process.env.AI_API_KEY = apiKey;
+
+    res.json({ ok: true });
+});
+
+// ログをAIに送って解析結果を返す
+app.post('/api/analyze-log', async (req, res) => {
+    const { logs } = req.body || {};
+    if (!Array.isArray(logs) || logs.length === 0)
+        return res.status(400).json({ error: 'logs 配列が必要です' });
+
+    const apiKey = process.env.AI_API_KEY;
+    if (!apiKey) return res.status(503).json({ error: 'AI APIキーが未設定です。設定画面からキーを入力してください。' });
+
+    const baseUrl = (process.env.AI_BASE_URL || 'https://api.groq.com/openai/v1').replace(/\/$/, '');
+    const model = process.env.AI_MODEL || 'llama-3.3-70b-versatile';
+
+    const logText = logs.map(l => `[${l.level}] [${l.name}] ${l.msg}`).join('\n');
+    const systemPrompt = `あなたはROS 2の専門家です。以下のログを分析し、日本語で簡潔に答えてください。
+形式（マークダウン使用可）:
+**原因**: (1〜2行)
+**対処法**: (具体的なコマンドや手順を箇条書き)`;
+
+    try {
+        const r = await fetch(`${baseUrl}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+            body: JSON.stringify({
+                model,
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: `ROS 2ログを分析してください:\n\n${logText}` },
+                ],
+                max_tokens: 600,
+                temperature: 0.2,
+            }),
+        });
+        const data = await r.json();
+        if (!r.ok) return res.status(r.status).json({ error: data.error?.message || 'AI APIエラー' });
+        res.json({ result: data.choices?.[0]?.message?.content || '解析結果が空でした' });
+    } catch (e) {
+        res.status(500).json({ error: `接続エラー: ${e.message}` });
     }
 });
 

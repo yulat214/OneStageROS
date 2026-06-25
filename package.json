@@ -21,6 +21,7 @@
             "@xterm/xterm": "^6.0.0",
             "concurrently": "^9.2.1",
             "cors": "^2.8.6",
+            "dotenv": "^17.4.2",
             "express": "^5.2.1",
             "express-rate-limit": "^8.4.0",
             "lucide-react": "^0.487.0",
