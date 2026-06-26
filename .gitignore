@@ -27,3 +27,6 @@ Thumbs.db
 # エディタの設定ファイル
 .vscode/
 .idea/
+
+# テストチェックリスト（ローカル管理）
+TEST_CHECKLIST.*
