@@ -14,6 +14,8 @@ export function useROS(jointTopic: string) {
   const odomPubTopicRef = useRef<ROSLIB.Topic | null>(null);
   // Nav2 オドメトリ: 受信時刻を含む。null = 未受信（デッドレコニングにフォールバック）
   const odomPoseRef = useRef<{ x: number; y: number; yaw: number; time: number } | null>(null);
+  // 2D Pose Estimate 受信時の初期位置（マップフレーム座標）。pending=true で未適用
+  const initialPoseRef = useRef<{ x: number; y: number; yaw: number; pending: boolean } | null>(null);
 
   useEffect(() => {
     const hostname = window.location.hostname;
@@ -111,10 +113,52 @@ export function useROS(jointTopic: string) {
       odomPoseRef.current = { x: pos.x, y: pos.y, yaw, time: Date.now() };
     });
 
+    // 2D Pose Estimate を受信したら odom を即座に (0,0,0) にリセット
+    // AMCL は次のスキャン処理時に odom→base_link TF を参照して map→odom を計算する。
+    // その前に TF=(0,0,0) を push しておくことで map→odom = initialpose となり位置ずれを防ぐ。
+    const initialPoseListener = new ROSLIB.Topic({
+      ros,
+      name: '/initialpose',
+      messageType: 'geometry_msgs/msg/PoseWithCovarianceStamped',
+    });
+    initialPoseListener.subscribe((_message: any) => {
+      // animation frame を待たずに即座に TF=(0,0,0) を publish
+      if (tfTopicRef.current) {
+        try {
+          const now = Date.now();
+          const sec = Math.floor(now / 1000);
+          const nanosec = (now % 1000) * 1_000_000;
+          tfTopicRef.current.publish({
+            transforms: [
+              {
+                header: { stamp: { sec, nanosec }, frame_id: 'odom' },
+                child_frame_id: 'base_link',
+                transform: {
+                  translation: { x: 0, y: 0, z: 0 },
+                  rotation: { x: 0, y: 0, z: 0, w: 1 },
+                },
+              },
+              {
+                header: { stamp: { sec, nanosec }, frame_id: 'base_link' },
+                child_frame_id: 'base_scan',
+                transform: {
+                  translation: { x: 0, y: 0, z: 0.15 },
+                  rotation: { x: 0, y: 0, z: 0, w: 1 },
+                },
+              },
+            ],
+          });
+        } catch {}
+      }
+      // animation loop にも currentPoseRef を (0,0,0) にリセットさせる
+      initialPoseRef.current = { x: 0, y: 0, yaw: 0, pending: true };
+    });
+
     return () => {
       jointListener.unsubscribe();
       cmdVelListener.unsubscribe();
       odomListener.unsubscribe();
+      initialPoseListener.unsubscribe();
       scanTopicRef.current = null;
       tfTopicRef.current = null;
       odomPubTopicRef.current = null;
@@ -186,5 +230,5 @@ export function useROS(jointTopic: string) {
     } catch {}
   }, []);
 
-  return { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, publishTF, odomPoseRef };
+  return { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, publishTF, odomPoseRef, initialPoseRef };
 }

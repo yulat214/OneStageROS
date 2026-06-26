@@ -135,7 +135,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   const [isFileBrowserOpen, setIsFileBrowserOpen] = useState(false);
   const [isObjectListOpen, setIsObjectListOpen] = useState(false); // 個別削除メニューの開閉状態
 
-  const { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, publishTF } = useROS(jointTopic);
+  const { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, publishTF, initialPoseRef } = useROS(jointTopic);
   const { obstacles, addWorldModel, addBuiltMesh, removeObjectById, clearObstacles, exportEnvironment, loadEnvironment } = useWorldManager(scene);
   const { simulateLidar } = useLidarSim();
 
@@ -699,6 +699,13 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
         
         if (urdfElement?.robot) {
             if (!isPausedRef.current) {
+                // 2D Pose Estimate 受信時: odom 座標をその位置にリセット
+                const ip = initialPoseRef.current;
+                if (ip?.pending) {
+                    currentPoseRef.current = { x: ip.x, y: ip.y, yaw: ip.yaw };
+                    ip.pending = false;
+                }
+
                 const { linearX, angularZ } = cmdVelRef.current;
                 const pose = currentPoseRef.current;
                 pose.yaw += angularZ * dt;
