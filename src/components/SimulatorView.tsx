@@ -135,9 +135,70 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   const [isFileBrowserOpen, setIsFileBrowserOpen] = useState(false);
   const [isObjectListOpen, setIsObjectListOpen] = useState(false); // 個別削除メニューの開閉状態
 
-  const { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, odomPoseRef } = useROS(jointTopic);
+  const { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, publishTF, odomPoseRef } = useROS(jointTopic);
   const { obstacles, addWorldModel, addBuiltMesh, removeObjectById, clearObstacles, exportEnvironment, loadEnvironment } = useWorldManager(scene);
   const { simulateLidar } = useLidarSim();
+
+  // rosbridge 自体が落ちたとき（稀）にビューアを消す
+  const prevRosStatusRef = useRef<string>('Disconnected');
+  useEffect(() => {
+    prevRosStatusRef.current = rosStatus;
+    if (rosStatus === 'Disconnected' || rosStatus === 'Error') {
+      const viewer = viewerRef.current as any;
+      // customElements.define 前に呼ぶと own property が prototype setter を shadow するため必ずガード
+      if (viewer && customElements.get('urdf-viewer')) viewer.urdf = '';
+    }
+  }, [rosStatus]);
+
+  // ROS ノードの生死をサーバー経由で3秒ごとに監視
+  const rosConnectedRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    const hostname = window.location.hostname;
+    const ASSET_SERVER_URL = `http://${hostname}:8000/`;
+
+    const check = async () => {
+      try {
+        // customElements.define 前は viewer の urdf setter が機能しないためスキップ
+        if (!customElements.get('urdf-viewer')) return;
+
+        const res = await fetch(`${ASSET_SERVER_URL}api/ros/status`);
+        const { connected } = await res.json() as { connected: boolean };
+        const viewer = viewerRef.current as any;
+        if (!viewer) return;
+
+        const prev = rosConnectedRef.current;
+        rosConnectedRef.current = connected;
+
+        if (!connected && prev !== false) {
+          viewer.urdf = '';
+        } else if (connected && prev !== true) {
+          // 初回(null)・再接続(false) どちらもロードする
+          viewer.urdf = `${ASSET_SERVER_URL}robot.urdf?t=${Date.now()}`;
+        }
+      } catch {}
+    };
+
+    const interval = setInterval(check, 3000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // initViewer 完了（isLoaded=true）のタイミングで即チェック
+  useEffect(() => {
+    if (!isLoaded) return;
+    const hostname = window.location.hostname;
+    const ASSET_SERVER_URL = `http://${hostname}:8000/`;
+    fetch(`${ASSET_SERVER_URL}api/ros/status`)
+      .then(r => r.json())
+      .then(({ connected }: { connected: boolean }) => {
+        const viewer = viewerRef.current as any;
+        if (!viewer) return;
+        rosConnectedRef.current = connected;
+        if (connected) {
+          viewer.urdf = `${ASSET_SERVER_URL}robot.urdf?t=${Date.now()}`;
+        }
+      })
+      .catch(() => {});
+  }, [isLoaded]);
 
   const currentPoseRef = useRef({ x: 0, y: 0, yaw: 0 });
   const [isPaused, setIsPaused] = useState(false);
@@ -536,7 +597,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
           }
         };
 
-        viewer.urdf = `${ASSET_SERVER_URL}robot.urdf`;
+        // viewer.urdf はポーリングで設定するためここでは設定しない
 
         const checkScene = setInterval(() => {
             if (viewer.scene) {
@@ -632,8 +693,9 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
 
         const delta = time - lastTime;
         if (delta < INTERVAL) return;
-        
-        const dt = delta / 1000;
+
+        // フレーム遅延が大きいときに位置が飛ばないよう 100ms でキャップ
+        const dt = Math.min(delta / 1000, 0.1);
         lastTime = time;
 
         const urdfElement = viewerRef.current as any;
@@ -659,6 +721,16 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
 
                 urdfElement.robot.position.set(currentPoseRef.current.x, currentPoseRef.current.y, 0);
                 urdfElement.robot.rotation.z = currentPoseRef.current.yaw;
+
+                // Nav2 OFF 時はこちらで odom → base_link TF を publish
+                // Nav2 ON 時は Nav2 スタック自身が同 TF を出すため競合を避けて skip
+                if (!isNav2ModeRef.current) {
+                    publishTF(
+                        currentPoseRef.current.x,
+                        currentPoseRef.current.y,
+                        currentPoseRef.current.yaw,
+                    );
+                }
             }
 
             if (urdfElement.robot.joints && needsUpdateRef.current) {
@@ -685,7 +757,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
 
     animate(performance.now());
     return () => cancelAnimationFrame(animationFrameId);
-  }, [scene, obstacles, cmdVelRef, jointPositionsRef, needsUpdateRef, simulateLidar, publishScan]); 
+  }, [scene, obstacles, cmdVelRef, jointPositionsRef, needsUpdateRef, simulateLidar, publishScan, publishTF]); 
 
   return (
     <div className="h-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg overflow-hidden flex flex-col shadow-sm relative">

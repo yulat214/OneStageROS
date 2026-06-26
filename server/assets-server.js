@@ -5,7 +5,7 @@ const serveIndex = require('serve-index');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { spawn } = require('child_process');
+const { spawn, exec } = require('child_process');
 const xml2js = require('xml2js');
 
 // AI設定を server/.env から読み込む（gitignore済み）
@@ -31,11 +31,7 @@ const apiLimiter = rateLimit({ windowMs: 60_000, max: 200, standardHeaders: true
 app.use('/api/', apiLimiter);
 
 console.log('---------------------------------------------------');
-try {
-    require('./sync-minimal');
-} catch (e) {
-    console.error('Asset sync failed:', e);
-}
+const { extractAssets } = require('./sync-minimal');
 console.log('---------------------------------------------------');
 
 function getSafeAbsolutePath(relPath) {
@@ -269,6 +265,43 @@ app.get('/api/convert-sdf', async (req, res) => {
 app.get('/api/session', (req, res) => {
     res.json({ sessionId: SESSION_ID });
 });
+
+// ROS 再接続時にフロントエンドから呼ばれる URDF 再同期エンドポイント
+app.post('/api/sync', async (req, res) => {
+    try {
+        await extractAssets({ retry: false });
+        res.json({ ok: true });
+    } catch (e) {
+        res.status(503).json({ error: 'ROS not available' });
+    }
+});
+
+// ROS 接続状態を返す（robot.urdf が存在するか＝同期済みか）
+app.get('/api/ros/status', (req, res) => {
+    res.json({ connected: fs.existsSync(path.join(ASSETS_DIR, 'robot.urdf')) });
+});
+
+// ROS ノードの生死を定期監視し、切断時にデータ削除・復活時に再同期する
+let _syncInProgress = false;
+setInterval(() => {
+    if (_syncInProgress) return;
+    exec('ros2 node list', { timeout: 2000 }, (err, stdout) => {
+        const rosUp = !err && stdout.includes('/robot_state_publisher');
+        const urdfExists = fs.existsSync(path.join(ASSETS_DIR, 'robot.urdf'));
+
+        if (!rosUp && urdfExists) {
+            fs.rmSync(ASSETS_DIR, { recursive: true, force: true });
+            fs.mkdirSync(ASSETS_DIR, { recursive: true });
+            console.log('[ROS] Disconnected: cleared ros2_data/');
+        } else if (rosUp && !urdfExists) {
+            _syncInProgress = true;
+            extractAssets({ retry: false })
+                .then(() => console.log('[ROS] Reconnected: assets re-synced'))
+                .catch(() => console.log('[ROS] Reconnect sync failed'))
+                .finally(() => { _syncInProgress = false; });
+        }
+    });
+}, 3000);
 
 app.post('/api/file', (req, res) => {
     try {

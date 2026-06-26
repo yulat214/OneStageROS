@@ -33,7 +33,9 @@ export function useLidarSim() {
       if (intersects.length > 0) {
         ranges.push(intersects[0].distance);
       } else {
-        ranges.push(maxRange); // ヒットなし = range_max（Infinity は JSON で null になるため使用不可）
+        // range_max より大きい値 = 無効レイ → slam_toolbox が壁セルを生成しない
+        // Infinity は JSON で null になるため有限値で range_max を超える値を使う
+        ranges.push(maxRange + 0.001);
       }
     }
 
