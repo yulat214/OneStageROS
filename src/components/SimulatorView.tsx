@@ -135,7 +135,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   const [isFileBrowserOpen, setIsFileBrowserOpen] = useState(false);
   const [isObjectListOpen, setIsObjectListOpen] = useState(false); // 個別削除メニューの開閉状態
 
-  const { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, publishTF, odomPoseRef } = useROS(jointTopic);
+  const { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, publishTF } = useROS(jointTopic);
   const { obstacles, addWorldModel, addBuiltMesh, removeObjectById, clearObstacles, exportEnvironment, loadEnvironment } = useWorldManager(scene);
   const { simulateLidar } = useLidarSim();
 
@@ -213,9 +213,6 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   const placementYawRef = useRef(0);
   const [placementYawDeg, setPlacementYawDeg] = useState(0);
   const isPausedRef = useRef(false);
-  // Nav2 モード: true の時だけ /odom でロボット位置を上書きする
-  const [isNav2Mode, setIsNav2Mode] = useState(false);
-  const isNav2ModeRef = useRef(false);
 
   const STORAGE_POSE_KEY = 'onestage_ros_pose';
   const STORAGE_ENV_KEY = 'onestage_ros_environment';
@@ -702,35 +699,22 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
         
         if (urdfElement?.robot) {
             if (!isPausedRef.current) {
-                const odom = odomPoseRef.current;
-                const useOdom = isNav2ModeRef.current
-                    && odom !== null
-                    && (Date.now() - odom.time) < 2000;
-
-                if (useOdom) {
-                    currentPoseRef.current.x = odom.x;
-                    currentPoseRef.current.y = odom.y;
-                    currentPoseRef.current.yaw = odom.yaw;
-                } else {
-                    const { linearX, angularZ } = cmdVelRef.current;
-                    const pose = currentPoseRef.current;
-                    pose.yaw += angularZ * dt;
-                    pose.x += linearX * Math.cos(pose.yaw) * dt;
-                    pose.y += linearX * Math.sin(pose.yaw) * dt;
-                }
+                const { linearX, angularZ } = cmdVelRef.current;
+                const pose = currentPoseRef.current;
+                pose.yaw += angularZ * dt;
+                pose.x += linearX * Math.cos(pose.yaw) * dt;
+                pose.y += linearX * Math.sin(pose.yaw) * dt;
 
                 urdfElement.robot.position.set(currentPoseRef.current.x, currentPoseRef.current.y, 0);
                 urdfElement.robot.rotation.z = currentPoseRef.current.yaw;
 
-                // Nav2 OFF 時はこちらで odom → base_link TF を publish
-                // Nav2 ON 時は Nav2 スタック自身が同 TF を出すため競合を避けて skip
-                if (!isNav2ModeRef.current) {
-                    publishTF(
-                        currentPoseRef.current.x,
-                        currentPoseRef.current.y,
-                        currentPoseRef.current.yaw,
-                    );
-                }
+                // Nav2 ON/OFF 問わず常に odom → base_link TF を publish。
+                // AMCL が TF チェーンを使って map → odom を出すため常に必要。
+                publishTF(
+                    currentPoseRef.current.x,
+                    currentPoseRef.current.y,
+                    currentPoseRef.current.yaw,
+                );
             }
 
             if (urdfElement.robot.joints && needsUpdateRef.current) {
@@ -766,20 +750,6 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
       <div className="bg-gray-100 dark:bg-gray-700 px-4 py-2 border-b border-gray-300 dark:border-gray-600 flex justify-between items-center z-20">
         <h2 className="text-sm font-medium text-gray-700 dark:text-gray-300">メインシミュレータビュー</h2>
         <div className="flex gap-3 items-center">
-          <button
-            onClick={() => {
-              isNav2ModeRef.current = !isNav2ModeRef.current;
-              setIsNav2Mode(isNav2ModeRef.current);
-            }}
-            className={`text-xs px-3 py-1.5 rounded shadow-sm font-medium transition-colors ${
-              isNav2Mode
-                ? 'bg-blue-600 hover:bg-blue-700 text-white'
-                : 'bg-gray-200 hover:bg-gray-300 text-gray-700 dark:bg-gray-600 dark:text-gray-200'
-            }`}
-            title="ON: /odom でロボット位置を同期（Nav2 使用時）&#10;OFF: cmd_vel デッドレコニング（手動操縦時）"
-          >
-            {isNav2Mode ? '📡 Nav2 ON' : '📡 Nav2 OFF'}
-          </button>
           <button
             onClick={togglePause}
             className={`text-xs px-3 py-1.5 rounded shadow-sm font-medium transition-colors ${

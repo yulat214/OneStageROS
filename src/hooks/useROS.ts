@@ -11,6 +11,7 @@ export function useROS(jointTopic: string) {
   const rosRef = useRef<ROSLIB.Ros | null>(null);
   const scanTopicRef = useRef<ROSLIB.Topic | null>(null);
   const tfTopicRef = useRef<ROSLIB.Topic | null>(null);
+  const odomPubTopicRef = useRef<ROSLIB.Topic | null>(null);
   // Nav2 オドメトリ: 受信時刻を含む。null = 未受信（デッドレコニングにフォールバック）
   const odomPoseRef = useRef<{ x: number; y: number; yaw: number; time: number } | null>(null);
 
@@ -31,6 +32,12 @@ export function useROS(jointTopic: string) {
         ros,
         name: '/tf',
         messageType: 'tf2_msgs/msg/TFMessage',
+      });
+
+      odomPubTopicRef.current = new ROSLIB.Topic({
+        ros,
+        name: '/odom',
+        messageType: 'nav_msgs/msg/Odometry',
       });
 
       // base_link → base_scan の静的 TF を1回 publish
@@ -55,8 +62,8 @@ export function useROS(jointTopic: string) {
         }],
       }));
     });
-    ros.on('error', () => { setRosStatus('Error'); scanTopicRef.current = null; });
-    ros.on('close', () => { setRosStatus('Disconnected'); scanTopicRef.current = null; });
+    ros.on('error', () => { setRosStatus('Error'); scanTopicRef.current = null; odomPubTopicRef.current = null; });
+    ros.on('close', () => { setRosStatus('Disconnected'); scanTopicRef.current = null; odomPubTopicRef.current = null; });
 
     // ジョイント状態の購読
     const jointListener = new ROSLIB.Topic({
@@ -110,6 +117,7 @@ export function useROS(jointTopic: string) {
       odomListener.unsubscribe();
       scanTopicRef.current = null;
       tfTopicRef.current = null;
+      odomPubTopicRef.current = null;
       odomPoseRef.current = null;
       ros.close();
     };
@@ -132,18 +140,48 @@ export function useROS(jointTopic: string) {
     if (!tfTopicRef.current) return;
     try {
       const now = Date.now();
+      const sec = Math.floor(now / 1000);
+      const nanosec = (now % 1000) * 1_000_000;
+      const qz = Math.sin(yaw / 2);
+      const qw = Math.cos(yaw / 2);
+
       tfTopicRef.current.publish(({
-        transforms: [{
-          header: {
-            stamp: { sec: Math.floor(now / 1000), nanosec: (now % 1000) * 1_000_000 },
-            frame_id: 'odom',
+        transforms: [
+          {
+            header: { stamp: { sec, nanosec }, frame_id: 'odom' },
+            child_frame_id: 'base_link',
+            transform: {
+              translation: { x, y, z: 0 },
+              rotation: { x: 0, y: 0, z: qz, w: qw },
+            },
           },
-          child_frame_id: 'base_link',
-          transform: {
-            translation: { x, y, z: 0 },
-            rotation: { x: 0, y: 0, z: Math.sin(yaw / 2), w: Math.cos(yaw / 2) },
+          // /tf_static の latch に依存しないよう毎フレーム /tf にも含める
+          {
+            header: { stamp: { sec, nanosec }, frame_id: 'base_link' },
+            child_frame_id: 'base_scan',
+            transform: {
+              translation: { x: 0, y: 0, z: 0.15 },
+              rotation: { x: 0, y: 0, z: 0, w: 1 },
+            },
           },
-        }],
+        ],
+      }));
+
+      // AMCL のモーションモデルに必要な /odom トピックも publish
+      odomPubTopicRef.current?.publish(({
+        header: { stamp: { sec, nanosec }, frame_id: 'odom' },
+        child_frame_id: 'base_link',
+        pose: {
+          pose: {
+            position: { x, y, z: 0 },
+            orientation: { x: 0, y: 0, z: qz, w: qw },
+          },
+          covariance: Array(36).fill(0),
+        },
+        twist: {
+          twist: { linear: { x: 0, y: 0, z: 0 }, angular: { x: 0, y: 0, z: 0 } },
+          covariance: Array(36).fill(0),
+        },
       }));
     } catch {}
   }, []);
