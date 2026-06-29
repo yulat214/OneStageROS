@@ -68,9 +68,13 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({ filePath, onSaveSuccess 
     if (path.endsWith('.py')) return 'python';
     if (path.endsWith('.js') || path.endsWith('.jsx')) return 'javascript';
     if (path.endsWith('.ts') || path.endsWith('.tsx')) return 'typescript';
-    if (path.endsWith('.cpp') || path.endsWith('.hpp')) return 'cpp';
-    if (path.endsWith('.xml') || path.endsWith('.urdf')) return 'xml';
+    if (path.endsWith('.cpp') || path.endsWith('.cc') || path.endsWith('.hpp') || path.endsWith('.h') || path.endsWith('.c')) return 'cpp';
+    if (path.endsWith('.xml') || path.endsWith('.urdf') || path.endsWith('.xacro') || path.endsWith('.launch') || path.endsWith('.sdf') || path.endsWith('.world') || path.endsWith('.model')) return 'xml';
+    if (path.endsWith('.yaml') || path.endsWith('.yml')) return 'yaml';
+    if (path.endsWith('.sh') || path.endsWith('.bash')) return 'shell';
     if (path.endsWith('.json')) return 'json';
+    if (path.endsWith('.cmake') || path.includes('CMakeLists')) return 'cmake';
+    if (path.endsWith('.md')) return 'markdown';
     return 'plaintext';
   };
 
