@@ -1,6 +1,7 @@
 const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
 // ▼ 出力先
 const OUTPUT_DIR = path.join(__dirname, '../ros2_data');
@@ -10,6 +11,25 @@ if (fs.existsSync(OUTPUT_DIR)) {
     fs.rmSync(OUTPUT_DIR, { recursive: true, force: true });
 }
 fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+
+// ros2 pkg prefix が失敗した場合、~/*/install/${pkgName} をフォールバック検索する
+function findPkgPrefix(pkgName) {
+    try {
+        return execSync(`ros2 pkg prefix ${pkgName}`, { encoding: 'utf-8', stdio: 'pipe' }).trim();
+    } catch (_) {}
+
+    // ホーム直下の全ワークスペースの install ディレクトリを検索
+    const homeDir = os.homedir();
+    try {
+        const entries = fs.readdirSync(homeDir);
+        for (const entry of entries) {
+            const candidate = path.join(homeDir, entry, 'install', pkgName);
+            if (fs.existsSync(candidate)) return candidate;
+        }
+    } catch (_) {}
+
+    throw new Error(`Package not found: ${pkgName}`);
+}
 
 const ALLOWED_EXTS = new Set([
     '.urdf', '.xacro', '.xml',
@@ -82,7 +102,7 @@ function extractAssets({ retry = true } = {}) {
             requiredPackages.forEach(pkgName => {
                 try {
                     if (!/^[\w_]+$/.test(pkgName)) throw new Error(`Invalid package name: ${pkgName}`);
-                    const prefixPath = execSync(`ros2 pkg prefix ${pkgName}`, { encoding: 'utf-8', stdio: 'pipe' }).trim();
+                    const prefixPath = findPkgPrefix(pkgName);
                     const sharePath = path.join(prefixPath, 'share', pkgName);
 
                     if (fs.existsSync(sharePath)) {
