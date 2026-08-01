@@ -201,6 +201,9 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   }, [isLoaded]);
 
   const currentPoseRef = useRef({ x: 0, y: 0, yaw: 0 });
+  // 移動機構(ベース)の有無。"world" リンクへの fixed joint（アームを台に固定する慣習）が
+  // あれば移動機構なしと判定し、/cmd_vel を無視する。既定は true（従来どおり移動可能）。
+  const hasMobileBaseRef = useRef(true);
   const [isPaused, setIsPaused] = useState(false);
 
   // 配置モード（プリミティブ用カーソル追従）
@@ -216,8 +219,22 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
 
   const STORAGE_POSE_KEY = 'onestage_ros_pose';
   const STORAGE_ENV_KEY = 'onestage_ros_environment';
+  const STORAGE_GROUND_COLOR_KEY = 'onestage_ros_ground_color';
   const isRestoringRef = useRef(false);
   const obstaclesInitRef = useRef(true);
+
+  const [groundColor, setGroundColor] = useState(
+    () => localStorage.getItem(STORAGE_GROUND_COLOR_KEY) || '#e8e8e8'
+  );
+  const groundColorRef = useRef(groundColor);
+  groundColorRef.current = groundColor;
+
+  const handleGroundColorChange = (hex: string) => {
+    setGroundColor(hex);
+    localStorage.setItem(STORAGE_GROUND_COLOR_KEY, hex);
+    const mat = groundMeshRef.current?.material as import('three').MeshLambertMaterial | undefined;
+    mat?.color.set(hex);
+  };
 
   const togglePause = () => {
     isPausedRef.current = !isPausedRef.current;
@@ -330,7 +347,8 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
           if (!ghostRef.current) return;
           const [sx = 0, sy = 0, sz = 0, , , yaw = 0] = obj.pose as number[];
           const relPos: [number, number, number] = [sx, sz, -sy];
-          const rotY = -yaw;
+          // SDF Z-up(x,y,z,yaw) → three.js Y-up(x,z,-y) の変換と整合させるため符号反転しない
+          const rotY = yaw;
 
           if (obj.type === 'mesh') {
             const meshUrl = `http://${hostname}:8000${obj.url}`;
@@ -479,13 +497,15 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
         for (const obj of (data.objects ?? [])) {
           const [sx = 0, sy = 0, sz = 0, , , yaw = 0] = obj.pose as number[];
           // SDF Z-up → Y-up 変換後の相対位置を userYaw で回転
+          // (three.js の rotation.y=θ は local +X を world (cosθ,0,-sinθ) に写すため、
+          //  オブジェクト自身の向き(rotY)の回転方向と合わせてこの符号にする)
           const relX = sx, relZ = -sy;
           const pos: [number, number, number] = [
-            relX * cosY - relZ * sinY + p.x,
+            relX * cosY + relZ * sinY + p.x,
             (sz) + p.y,
-            relX * sinY + relZ * cosY + p.z,
+            -relX * sinY + relZ * cosY + p.z,
           ];
-          const rotY = -yaw;
+          const rotY = yaw;
           if (obj.type === 'mesh') {
             const meshUrl = `http://${hostname}:8000${obj.url}`;
             // userYaw × sdfYaw × orientFix
@@ -514,7 +534,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
               uri = `primitive://sphere?r=${r}`;
             }
             if (geo && uri) {
-              const mat = new THREE.MeshPhongMaterial({ color: 0x8899aa });
+              const mat = new THREE.MeshPhongMaterial({ color: obj.color ?? 0x8899aa });
               addBuiltMesh(new THREE.Mesh(geo, mat), obj.name, pos, [0, rotY + userYaw, 0], uri);
               loaded++;
             }
@@ -567,7 +587,14 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
         const viewer = viewerRef.current as any;
         if (!viewer) return;
         const hostname = window.location.hostname;
-        const ASSET_SERVER_URL = `http://${hostname}:8000/`;        
+        const ASSET_SERVER_URL = `http://${hostname}:8000/`;
+
+        // URDF読込完了ごとに移動機構の有無を判定する。
+        // "world" リンクへの fixed joint はロボットを台に固定する慣習（lerobot等の固定アーム）であり、
+        // これがあるロボットは /cmd_vel を受け取っても移動させない。
+        viewer.addEventListener('urdf-processed', () => {
+          hasMobileBaseRef.current = !viewer.robot?.links?.world;
+        });
 
         viewer.loadMeshFunc = (path: string, manager: any, done: any) => {
           let resolvedPath = path;
@@ -606,7 +633,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
                 viewer.scene.add(gridHelper);
                 // 不透明な地面（Y=0 より下を隠して「埋まり」を防ぐ）
                 const groundGeo = new THREE.PlaneGeometry(20, 20);
-                const groundMat = new THREE.MeshLambertMaterial({ color: 0xe8e8e8 });
+                const groundMat = new THREE.MeshLambertMaterial({ color: groundColorRef.current });
                 const ground = new THREE.Mesh(groundGeo, groundMat);
                 ground.rotation.x = -Math.PI / 2;
                 ground.position.y = -0.002;
@@ -706,16 +733,19 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
                     ip.pending = false;
                 }
 
-                const { linearX, angularZ } = cmdVelRef.current;
-                const pose = currentPoseRef.current;
-                pose.yaw += angularZ * dt;
-                pose.x += linearX * Math.cos(pose.yaw) * dt;
-                pose.y += linearX * Math.sin(pose.yaw) * dt;
+                // 移動機構のないロボット（固定アーム等）は /cmd_vel を無視し原点に留める
+                if (hasMobileBaseRef.current) {
+                    const { linearX, angularZ } = cmdVelRef.current;
+                    const pose = currentPoseRef.current;
+                    pose.yaw += angularZ * dt;
+                    pose.x += linearX * Math.cos(pose.yaw) * dt;
+                    pose.y += linearX * Math.sin(pose.yaw) * dt;
+                }
 
                 urdfElement.robot.position.set(currentPoseRef.current.x, currentPoseRef.current.y, 0);
                 urdfElement.robot.rotation.z = currentPoseRef.current.yaw;
 
-                // Nav2 ON/OFF 問わず常に odom → base_link TF を publish。
+                // Nav2 ON/OFF 問わず常に odom → base_footprint TF を publish。
                 // AMCL が TF チェーンを使って map → odom を出すため常に必要。
                 publishTF(
                     currentPoseRef.current.x,
@@ -801,6 +831,16 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
                 reader.readAsText(file);
                 e.target.value = '';
               }} 
+            />
+          </label>
+          <label className="text-xs flex items-center gap-1.5 bg-white dark:bg-gray-600 px-2 py-1 rounded shadow-sm border border-gray-200 dark:border-gray-500 text-gray-700 dark:text-gray-200 cursor-pointer">
+            地面の色
+            <input
+              type="color"
+              value={groundColor}
+              onChange={(e) => handleGroundColorChange(e.target.value)}
+              className="w-6 h-5 p-0 border-0 bg-transparent cursor-pointer"
+              title="地面の色を変更"
             />
           </label>
           <div className="text-xs px-2 py-1 rounded bg-white dark:bg-gray-600 shadow-sm border border-gray-200 dark:border-gray-500">

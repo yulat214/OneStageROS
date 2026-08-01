@@ -135,6 +135,18 @@ app.get('/api/convert-sdf', async (req, res) => {
 
         const objects = [];
 
+        // <material> の diffuse/ambient から色を抽出（"r g b a" → 0xRRGGBB）
+        function parseColor(material) {
+            const mat = material?.[0];
+            if (!mat) return null;
+            const raw = mat.diffuse?.[0] ?? mat.ambient?.[0];
+            if (!raw) return null;
+            const [r, g, b] = String(raw).trim().split(/\s+/).map(Number);
+            if ([r, g, b].some(Number.isNaN)) return null;
+            const to255 = v => Math.max(0, Math.min(255, Math.round(v * 255)));
+            return (to255(r) << 16) | (to255(g) << 8) | to255(b);
+        }
+
         // 単一リンク配列 + 親ポーズ → visuals を objects に追加
         function extractVisuals(linkArr, parentPose, modelName) {
             const links = Array.isArray(linkArr) ? linkArr : (linkArr ? [linkArr] : []);
@@ -147,6 +159,7 @@ app.get('/api/convert-sdf', async (req, res) => {
                     const vName = visual.$?.name || 'visual';
                     const geo   = visual.geometry?.[0];
                     if (!geo) continue;
+                    const color = parseColor(visual.material);
 
                     if (geo.mesh) {
                         const uri = geo.mesh[0].uri?.[0];
@@ -157,18 +170,18 @@ app.get('/api/convert-sdf', async (req, res) => {
                         if (url) objects.push({ type: 'mesh', name: `${modelName}/${vName}`, url, scale, pose });
                     } else if (geo.cylinder) {
                         objects.push({
-                            type: 'cylinder', name: `${modelName}/${vName}`, pose,
+                            type: 'cylinder', name: `${modelName}/${vName}`, pose, color,
                             radius: parseFloat(geo.cylinder[0].radius?.[0] ?? 0.1),
                             length: parseFloat(geo.cylinder[0].length?.[0] ?? 0.5),
                         });
                     } else if (geo.box) {
                         objects.push({
-                            type: 'box', name: `${modelName}/${vName}`, pose,
+                            type: 'box', name: `${modelName}/${vName}`, pose, color,
                             size: (geo.box[0].size?.[0] ?? '1 1 1').trim().split(/\s+/).map(Number),
                         });
                     } else if (geo.sphere) {
                         objects.push({
-                            type: 'sphere', name: `${modelName}/${vName}`, pose,
+                            type: 'sphere', name: `${modelName}/${vName}`, pose, color,
                             radius: parseFloat(geo.sphere[0].radius?.[0] ?? 0.5),
                         });
                     }
@@ -670,9 +683,16 @@ console.log('Terminal WebSocket: ws://localhost:' + PORT + '/terminal');
 
 // ===================================================
 
-process.on('SIGINT', () => {
-    console.log('\nShutting down all services...');
+function shutdown(signal) {
+    console.log(`\n[${signal}] Shutting down...`);
+    if (fs.existsSync(ASSETS_DIR)) {
+        fs.rmSync(ASSETS_DIR, { recursive: true, force: true });
+        console.log('ros2_data/ cleared.');
+    }
     runningProcesses.forEach(proc => proc.kill('SIGINT'));
     wss.close();
     server.close(() => process.exit(0));
-});
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));

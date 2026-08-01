@@ -83,40 +83,41 @@ export default function App() {
       {/* 2. メインコンテンツエリア */}
       <main className="flex-1 flex flex-col p-4 min-h-0">
 
-        {activeTab === 'simulator' ? (
-          // === シミュレータモード ===
-          <div className="flex-1 flex flex-col md:flex-row gap-4 min-h-0">
-            <div className="flex-1 md:max-w-[60%] flex flex-col min-h-0 min-w-0 bg-white rounded-lg border border-gray-200 shadow-sm">
-              <SimulatorView onSceneReady={setSharedScene} />
-            </div>
-            <aside className="flex flex-col md:flex-1 gap-4 min-h-0">
-              <div className="flex-1 min-h-[250px] bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
-                <RobotCameraView scene={sharedScene} />
-              </div>
-              <div className="flex-1 min-h-[250px] bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
-                <DebugLog />
-              </div>
-            </aside>
+        {/* === シミュレータモード ===
+            タブ切替でunmountするとROS接続(rosbridge WebSocket)が張り直され、
+            再接続の瞬間に /odom を旧・新2系統から送ってしまいタイムスタンプが
+            逆転することがある(cartographerのordered_multi_queueがFATALで落ちる原因)。
+            常時マウントしCSSで表示切替する。 */}
+        <div className={`flex-1 flex-col md:flex-row gap-4 min-h-0 ${activeTab === 'simulator' ? 'flex' : 'hidden'}`}>
+          <div className="flex-1 md:max-w-[60%] flex flex-col min-h-0 min-w-0 bg-white rounded-lg border border-gray-200 shadow-sm">
+            <SimulatorView onSceneReady={setSharedScene} />
           </div>
-        ) : (
-          <div className="flex-1 flex flex-row gap-4 min-h-0">
-            <div className="w-[250px] flex-shrink-0 bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden flex flex-col">
-              <FileExplorer
-                selectedPath={activeFilePath || undefined}
-                onFileSelect={(path) => setActiveFilePath(path)}
+          <aside className="flex flex-col md:flex-1 gap-4 min-h-0">
+            <div className="flex-1 min-h-[250px] bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+              <RobotCameraView scene={sharedScene} />
+            </div>
+            <div className="flex-1 min-h-[250px] bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+              <DebugLog />
+            </div>
+          </aside>
+        </div>
+        <div className={`flex-1 flex-row gap-4 min-h-0 ${activeTab === 'editor' ? 'flex' : 'hidden'}`}>
+          <div className="w-[250px] flex-shrink-0 bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden flex flex-col">
+            <FileExplorer
+              selectedPath={activeFilePath || undefined}
+              onFileSelect={(path) => setActiveFilePath(path)}
+            />
+          </div>
+          <div className="flex-1 bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden flex flex-col min-h-0">
+            <div className="flex-1 min-h-0 overflow-hidden">
+              <CodeEditor
+                filePath={activeFilePath}
+                onSaveSuccess={() => buildPanelRef.current?.onFileSaved()}
               />
             </div>
-            <div className="flex-1 bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden flex flex-col min-h-0">
-              <div className="flex-1 min-h-0 overflow-hidden">
-                <CodeEditor
-                  filePath={activeFilePath}
-                  onSaveSuccess={() => buildPanelRef.current?.onFileSaved()}
-                />
-              </div>
-              <BuildPanel ref={buildPanelRef} />
-            </div>
+            <BuildPanel ref={buildPanelRef} />
           </div>
-        )}
+        </div>
       </main>
 
       {/* 3. ターミナルパネル（両タブ共通・画面下部固定） */}

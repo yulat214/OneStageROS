@@ -36,18 +36,24 @@ export function useROS(jointTopic: string) {
         messageType: 'tf2_msgs/msg/TFMessage',
       });
 
+      // 実機/フェイクハードウェアの diff_drive_controller 等が /odom を
+      // 既に使っている場合に衝突しないよう、専用トピックに publish する。
+      // cartographer 等 SLAM 側は起動コマンドで `-r odom:=/onestage/odom` を
+      // remap してこちらを購読させる。
       odomPubTopicRef.current = new ROSLIB.Topic({
         ros,
-        name: '/odom',
+        name: '/onestage/odom',
         messageType: 'nav_msgs/msg/Odometry',
       });
 
       // base_link → base_scan の静的 TF を1回 publish
-      // ROS 2 rosbridge は latch を QoS で処理するため latch オプションは使わない
+      // latch: true 必須 — 指定しないと rosbridge 側の publisher lifespan が1秒に制限され、
+      // 接続から1秒以上経ってから起動した slam_toolbox / RViz がこの static transform を受信できない
       const tfStaticTopic = new ROSLIB.Topic({
         ros,
         name: '/tf_static',
         messageType: 'tf2_msgs/msg/TFMessage',
+        latch: true,
       });
       const now = Date.now();
       tfStaticTopic.publish(({
@@ -64,8 +70,22 @@ export function useROS(jointTopic: string) {
         }],
       }));
     });
-    ros.on('error', () => { setRosStatus('Error'); scanTopicRef.current = null; odomPubTopicRef.current = null; });
-    ros.on('close', () => { setRosStatus('Disconnected'); scanTopicRef.current = null; odomPubTopicRef.current = null; });
+    ros.on('error', (event: any) => {
+      console.error(`[ROS] error at ${new Date().toISOString()}`, event);
+      setRosStatus('Error');
+      scanTopicRef.current = null;
+      odomPubTopicRef.current = null;
+    });
+    ros.on('close', (event: any) => {
+      // event.code/reason/wasClean は生の WebSocket CloseEvent。
+      // code=1006 は異常切断（相手側クラッシュ・タイムアウト等）を示す。
+      console.warn(
+        `[ROS] closed at ${new Date().toISOString()} code=${event?.code} reason="${event?.reason}" wasClean=${event?.wasClean}`,
+      );
+      setRosStatus('Disconnected');
+      scanTopicRef.current = null;
+      odomPubTopicRef.current = null;
+    });
 
     // ジョイント状態の購読
     const jointListener = new ROSLIB.Topic({
@@ -169,9 +189,10 @@ export function useROS(jointTopic: string) {
 
   const publishScan = (scanData: any) => {
     if (!scanTopicRef.current) return;
+    const now = Date.now();
     scanTopicRef.current.publish({
       header: {
-        stamp: { sec: Math.floor(Date.now() / 1000), nanosec: 0 },
+        stamp: { sec: Math.floor(now / 1000), nanosec: (now % 1000) * 1_000_000 },
         frame_id: 'base_scan',
       },
       ...scanData,
