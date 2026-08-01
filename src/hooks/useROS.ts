@@ -15,7 +15,7 @@ export function useROS(jointTopic: string) {
   // Nav2 オドメトリ: 受信時刻を含む。null = 未受信（デッドレコニングにフォールバック）
   const odomPoseRef = useRef<{ x: number; y: number; yaw: number; time: number } | null>(null);
   // 2D Pose Estimate 受信時の初期位置（マップフレーム座標）。pending=true で未適用
-  const initialPoseRef = useRef<{ x: number; y: number; yaw: number; pending: boolean } | null>(null);
+  const initialPoseRef = useRef<{ pending: boolean } | null>(null);
 
   useEffect(() => {
     const hostname = window.location.hostname;
@@ -171,7 +171,7 @@ export function useROS(jointTopic: string) {
         } catch {}
       }
       // animation loop にも currentPoseRef を (0,0,0) にリセットさせる
-      initialPoseRef.current = { x: 0, y: 0, yaw: 0, pending: true };
+      initialPoseRef.current = { pending: true };
     });
 
     return () => {

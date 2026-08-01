@@ -201,6 +201,10 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   }, [isLoaded]);
 
   const currentPoseRef = useRef({ x: 0, y: 0, yaw: 0 });
+  // 2D Pose Estimate 受信時点の見た目pose（currentPoseRef）のスナップショット。
+  // publishTFへは currentPoseRef からこの基準点を引いた相対値を渡すことで、
+  // 見た目(3Dビュー)は動かさずに odom TF だけ AMCL 用にリセットする。
+  const odomOriginRef = useRef({ x: 0, y: 0, yaw: 0 });
   // 移動機構(ベース)の有無。"world" リンクへの fixed joint（アームを台に固定する慣習）が
   // あれば移動機構なしと判定し、/cmd_vel を無視する。既定は true（従来どおり移動可能）。
   const hasMobileBaseRef = useRef(true);
@@ -726,10 +730,11 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
         
         if (urdfElement?.robot) {
             if (!isPausedRef.current) {
-                // 2D Pose Estimate 受信時: odom 座標をその位置にリセット
+                // 2D Pose Estimate 受信時: 見た目(currentPoseRef)は動かさず、
+                // odom TF算出用の基準点だけを現在の見た目位置に更新する
                 const ip = initialPoseRef.current;
                 if (ip?.pending) {
-                    currentPoseRef.current = { x: ip.x, y: ip.y, yaw: ip.yaw };
+                    odomOriginRef.current = { ...currentPoseRef.current };
                     ip.pending = false;
                 }
 
@@ -747,10 +752,17 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
 
                 // Nav2 ON/OFF 問わず常に odom → base_footprint TF を publish。
                 // AMCL が TF チェーンを使って map → odom を出すため常に必要。
+                // 見た目位置(currentPoseRef)から odomOriginRef を引いた相対値を渡す
+                // （2D Pose Estimate 直後は odomOriginRef = 見た目位置 なので相対値は0になる）
+                const origin = odomOriginRef.current;
+                const dx = currentPoseRef.current.x - origin.x;
+                const dy = currentPoseRef.current.y - origin.y;
+                const cosO = Math.cos(origin.yaw);
+                const sinO = Math.sin(origin.yaw);
                 publishTF(
-                    currentPoseRef.current.x,
-                    currentPoseRef.current.y,
-                    currentPoseRef.current.yaw,
+                    dx * cosO + dy * sinO,
+                    -dx * sinO + dy * cosO,
+                    currentPoseRef.current.yaw - origin.yaw,
                 );
             }
 
