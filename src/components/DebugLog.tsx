@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react';
-import { Terminal, Trash2, ChevronRight, ChevronDown, Activity, Languages, Settings, X, BotMessageSquare } from 'lucide-react';
+import { Terminal, Trash2, ChevronRight, ChevronDown, Activity, Languages, Settings, X, BotMessageSquare, Pause, Play } from 'lucide-react';
 import * as ROSLIB from 'roslib';
 
 interface SnapshotData {
@@ -63,6 +63,14 @@ export function DebugLog() {
   const rosRef = useRef<ROSLIB.Ros | null>(null);
   const hostname = window.location.hostname;
 
+  // ログ受信の一時停止（購読は維持したまま新規ログの取り込みだけ止める）
+  const [isLogPaused, setIsLogPaused] = useState(false);
+  const isLogPausedRef = useRef(false);
+  const toggleLogPause = () => {
+    isLogPausedRef.current = !isLogPausedRef.current;
+    setIsLogPaused(isLogPausedRef.current);
+  };
+
   // AI設定の読み込み
   const fetchAiStatus = useCallback(async () => {
     try {
@@ -88,6 +96,7 @@ export function DebugLog() {
     });
 
     listener.subscribe((message: any) => {
+      if (isLogPausedRef.current) return;
       const timeStr = new Date().toLocaleTimeString('ja-JP', { hour12: false });
       const level = Number(message.level);
       const id = Math.random().toString(36).substr(2, 9);
@@ -204,8 +213,17 @@ export function DebugLog() {
             {isConnected
               ? <span className="text-xs ml-2 text-green-500">● 接続中</span>
               : <span className="text-xs ml-2 text-red-500">● 未接続</span>}
+            {isLogPaused && <span className="text-xs ml-2 text-yellow-500">⏸ 一時停止中</span>}
           </h2>
           <div className="ml-auto flex items-center gap-1">
+            {/* 新規ログの一時停止・再開ボタン */}
+            <button
+              onClick={toggleLogPause}
+              title={isLogPaused ? '新規ログの受信を再開' : '新規ログの受信を一時停止'}
+              className={`p-1.5 rounded transition-colors ${isLogPaused ? 'text-yellow-500 hover:bg-gray-200 dark:hover:bg-gray-600' : 'text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-600'}`}
+            >
+              {isLogPaused ? <Play className="w-5 h-5" /> : <Pause className="w-5 h-5" />}
+            </button>
             {/* AI設定ボタン */}
             <button
               onClick={() => setAiSettingsOpen(true)}

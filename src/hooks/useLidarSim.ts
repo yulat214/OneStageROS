@@ -35,6 +35,12 @@ export function useLidarSim() {
       } else {
         // range_max より大きい値 = 無効レイ → slam_toolbox が壁セルを生成しない
         // Infinity は JSON で null になるため有限値で range_max を超える値を使う
+        //
+        // range_max ちょうどの値を試したが、slam_toolbox 側の max_laser_range（デフォルト20.0、
+        // このセンサーの range_max=3.5 よりずっと大きい）が閾値として使われるため、
+        // 「無反射」ではなく「3.5m先の物体」として解釈され壁が誤生成された。
+        // 恒久対応は slam_toolbox の mapper params で max_laser_range をこのセンサーの
+        // range_max 以下に設定すること（要 ROS 側設定変更、このリポジトリ外）。
         ranges.push(maxRange + 0.001);
       }
     }

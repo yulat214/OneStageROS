@@ -187,9 +187,13 @@ export function useROS(jointTopic: string) {
     };
   }, [jointTopic]);
 
-  const publishScan = (scanData: any) => {
+  // stampMs省略時はDate.now()を使うが、可能な限り同一フレームでpublishTFに
+  // 渡した値と揃えること。scanのタイムスタンプがTFより後になると、AMCL側の
+  // tf2が「未来への外挿」としてルックアップを拒否し
+  // "Couldn't determine robot's pose associated with laser scan" の原因になる。
+  const publishScan = (scanData: any, stampMs?: number) => {
     if (!scanTopicRef.current) return;
-    const now = Date.now();
+    const now = stampMs ?? Date.now();
     scanTopicRef.current.publish({
       header: {
         stamp: { sec: Math.floor(now / 1000), nanosec: (now % 1000) * 1_000_000 },
@@ -201,10 +205,10 @@ export function useROS(jointTopic: string) {
 
   // odom → base_link の動的 TF を publish
   // Nav2 ON 時は Nav2 スタック自身が odom → base_link TF を出すため呼ばない
-  const publishTF = useCallback((x: number, y: number, yaw: number) => {
+  const publishTF = useCallback((x: number, y: number, yaw: number, stampMs?: number) => {
     if (!tfTopicRef.current) return;
     try {
-      const now = Date.now();
+      const now = stampMs ?? Date.now();
       const sec = Math.floor(now / 1000);
       const nanosec = (now % 1000) * 1_000_000;
       const qz = Math.sin(yaw / 2);

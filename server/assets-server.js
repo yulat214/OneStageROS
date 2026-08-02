@@ -683,7 +683,12 @@ console.log('Terminal WebSocket: ws://localhost:' + PORT + '/terminal');
 
 // ===================================================
 
+let isShuttingDown = false;
+
 function shutdown(signal) {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+
     console.log(`\n[${signal}] Shutting down...`);
     if (fs.existsSync(ASSETS_DIR)) {
         fs.rmSync(ASSETS_DIR, { recursive: true, force: true });
@@ -692,6 +697,9 @@ function shutdown(signal) {
     runningProcesses.forEach(proc => proc.kill('SIGINT'));
     wss.close();
     server.close(() => process.exit(0));
+
+    // サーバーが接続を保持したまま閉じきらない場合に備えたフォールバック
+    setTimeout(() => process.exit(0), 3000).unref();
 }
 
 process.on('SIGINT', () => shutdown('SIGINT'));

@@ -727,7 +727,11 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
         lastTime = time;
 
         const urdfElement = viewerRef.current as any;
-        
+        // 同一フレーム内のTFとscanで必ず同じ時刻を使う。
+        // 別々にDate.now()を取ると、raycast計算の分だけscanの方が後ろにずれ、
+        // AMCL側のtf2が「未来への外挿」としてルックアップを拒否することがある。
+        const frameStampMs = Date.now();
+
         if (urdfElement?.robot) {
             if (!isPausedRef.current) {
                 // 2D Pose Estimate 受信時: 見た目(currentPoseRef)は動かさず、
@@ -763,6 +767,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
                     dx * cosO + dy * sinO,
                     -dx * sinO + dy * cosO,
                     currentPoseRef.current.yaw - origin.yaw,
+                    frameStampMs,
                 );
             }
 
@@ -779,7 +784,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
               urdfElement.robot.updateMatrixWorld(true);
               const meshList = obstacles.map(obj => obj.mesh);
               const scanData = simulateLidar(urdfElement.robot, meshList);
-              publishScan(scanData);
+              publishScan(scanData, frameStampMs);
             }
 
             if (urdfElement.renderer && urdfElement.scene && urdfElement.camera) {
