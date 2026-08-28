@@ -11,7 +11,21 @@ export type EnvObject = {
   position: number[];   // [x, y, z]
   rotation: number[];   // [rx, ry, rz]
   meshScale?: number[]; // SDF 等から取得したスケール
+  // メッシュのローカル座標系でのバウンディングボックス中心（原点からのオフセット[x,y,z]）。
+  // 原点が中心にないモデル（例: 底面が原点のコーラ缶）でも、把持の近接判定は
+  // 見た目の中心を基準にできるようにするため保持する。
+  centerOffset: [number, number, number];
 };
+
+// mesh のローカル座標系でのバウンディングボックス中心を求める。
+// position/rotation/scale を設定する「前」（変形が単位行列の状態）で呼ぶこと。
+function computeLocalCenterOffset(mesh: THREE.Object3D): [number, number, number] {
+  const box = new THREE.Box3().setFromObject(mesh);
+  if (box.isEmpty()) return [0, 0, 0];
+  const center = new THREE.Vector3();
+  box.getCenter(center);
+  return [center.x, center.y, center.z];
+}
 
 export function useWorldManager(scene: THREE.Scene | null) {
   const [obstacles, setObstacles] = useState<EnvObject[]>([]);
@@ -54,6 +68,10 @@ export function useWorldManager(scene: THREE.Scene | null) {
     const fileName = url.split('/').pop() || 'Unknown Model';
 
     const onLoad = (mesh: THREE.Object3D) => {
+      // 変形（position/rotation/scale）を適用する前、原点=単位行列の状態で
+      // ローカルのバウンディングボックス中心を求める
+      const centerOffset = computeLocalCenterOffset(mesh);
+
       mesh.position.set(pos[0], pos[1], pos[2]);
       mesh.rotation.set(rot[0], rot[1], rot[2]);
       // ColladaLoader が unit 変換済みのスケールを持っている場合があるため
@@ -81,6 +99,7 @@ export function useWorldManager(scene: THREE.Scene | null) {
         position: pos,
         rotation: rot,
         meshScale,
+        centerOffset,
       }]);
     };
 
@@ -96,6 +115,30 @@ export function useWorldManager(scene: THREE.Scene | null) {
         const material = new THREE.MeshPhongMaterial({ color: 0x888888 });
         onLoad(new THREE.Mesh(geometry, material));
       });
+    } else if (ext === 'obj') {
+      const { OBJLoader } = await import('three/addons/loaders/OBJLoader.js');
+      const objLoader = new OBJLoader();
+
+      // .obj は mtllib 行が参照する .mtl（同ディレクトリ相対）にテクスチャ/マテリアルが
+      // 外出しされている（DAE/GLTFと違い自己完結しない）ため、先に .mtl を読んでから
+      // OBJLoader に適用する。mtllib が無い/読めない場合はジオメトリのみで続行する。
+      try {
+        const baseUrl = url.substring(0, url.lastIndexOf('/') + 1);
+        const objText = await fetch(url).then((r) => r.text());
+        const mtlName = objText.match(/^mtllib\s+(.+)$/m)?.[1]?.trim();
+        if (mtlName) {
+          const { MTLLoader } = await import('three/addons/loaders/MTLLoader.js');
+          const mtlLoader = new MTLLoader();
+          mtlLoader.setPath(baseUrl);
+          const materials = await mtlLoader.loadAsync(mtlName);
+          materials.preload();
+          objLoader.setMaterials(materials);
+        }
+      } catch {
+        // マテリアル読込に失敗してもジオメトリだけは表示できるようにする
+      }
+
+      objLoader.load(url, (obj: any) => onLoad(obj));
     }
   }, [scene]);
 
@@ -103,6 +146,7 @@ export function useWorldManager(scene: THREE.Scene | null) {
   // primitiveUri: 'primitive://cylinder?r=0.15&l=0.5' のようなジオメトリ情報入り URI
   const addBuiltMesh = useCallback((mesh: THREE.Object3D, name: string, pos: number[], rot: number[], primitiveUri: string) => {
     if (!scene) return;
+    const centerOffset = computeLocalCenterOffset(mesh);
     mesh.position.set(pos[0], pos[1], pos[2]);
     mesh.rotation.set(rot[0], rot[1], rot[2]);
     mesh.traverse((child: any) => {
@@ -116,6 +160,7 @@ export function useWorldManager(scene: THREE.Scene | null) {
       sourceUrl: primitiveUri,
       position: pos,
       rotation: rot,
+      centerOffset,
     }]);
   }, [scene]);
 

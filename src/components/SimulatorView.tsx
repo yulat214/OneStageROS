@@ -2,8 +2,9 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { X } from 'lucide-react';
 import type * as THREE from 'three';
 import { useROS } from '../hooks/useROS';
-import { useWorldManager } from '../hooks/useWorldManager'; 
-import { useLidarSim } from '../hooks/useLidarSim';         
+import { useWorldManager } from '../hooks/useWorldManager';
+import { useLidarSim } from '../hooks/useLidarSim';
+import { detectGripperProfile, type GripperProfile } from '../hooks/gripperProfiles';
 
 declare global {
   namespace JSX {
@@ -208,6 +209,12 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   // 移動機構(ベース)の有無。"world" リンクへの fixed joint（アームを台に固定する慣習）が
   // あれば移動機構なしと判定し、/cmd_vel を無視する。既定は true（従来どおり移動可能）。
   const hasMobileBaseRef = useRef(true);
+  // 現在ロードされているロボットのグリッパー仕様（未対応ロボットなら null）
+  const gripperProfileRef = useRef<GripperProfile | null>(null);
+  // 現在把持中の EnvObject.id（何も持っていなければ null）
+  const heldObjectIdRef = useRef<string | null>(null);
+  // 把持中オブジェクトを囲むハイライト表示（BoxHelper）
+  const heldBoxHelperRef = useRef<import('three').BoxHelper | null>(null);
   const [isPaused, setIsPaused] = useState(false);
 
   // 配置モード（プリミティブ用カーソル追従）
@@ -244,6 +251,20 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     isPausedRef.current = !isPausedRef.current;
     setIsPaused(isPausedRef.current);
   };
+
+  // 把持中オブジェクトを解放する（グリッパーが開いた時に呼ぶ）
+  const releaseHeldObject = useCallback(() => {
+    const viewer = viewerRef.current as any;
+    const heldId = heldObjectIdRef.current;
+    if (!heldId || !viewer?.scene) return;
+    const held = obstacles.find(o => o.id === heldId);
+    if (held) viewer.scene.attach(held.mesh);
+    if (heldBoxHelperRef.current) {
+      viewer.scene.remove(heldBoxHelperRef.current);
+      heldBoxHelperRef.current = null;
+    }
+    heldObjectIdRef.current = null;
+  }, [obstacles]);
 
   const resetPose = () => {
     currentPoseRef.current = { x: 0, y: 0, yaw: 0 };
@@ -578,6 +599,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     const initViewer = async () => {
       try {
         const THREE = await import('three') as typeof import('three');
+        threeRef.current = THREE;
         const { STLLoader } = await import('three/addons/loaders/STLLoader.js');
         const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
         const { ColladaLoader } = await import('three/addons/loaders/ColladaLoader.js');
@@ -598,6 +620,14 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
         // これがあるロボットは /cmd_vel を受け取っても移動させない。
         viewer.addEventListener('urdf-processed', () => {
           hasMobileBaseRef.current = !viewer.robot?.links?.world;
+
+          const profile = detectGripperProfile(viewer.robot);
+          gripperProfileRef.current = profile;
+          console.log(
+            profile
+              ? `[grasp] gripper profile detected: ${profile.id}`
+              : '[grasp] no known gripper profile for this robot'
+          );
         });
 
         viewer.loadMeshFunc = (path: string, manager: any, done: any) => {
@@ -778,6 +808,71 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
                 });
             }
 
+            const gripperProfile = gripperProfileRef.current;
+            if (gripperProfile) {
+                const drivingJoint = urdfElement.robot.joints?.[gripperProfile.drivingJointName];
+                const attachLink = urdfElement.robot.links?.[gripperProfile.attachLinkName];
+                if (drivingJoint && attachLink) {
+                    // joint.setJointValue() 直後は matrixWorld が古いため、距離判定・attach前に更新する
+                    // （下の scanCounter ブロックと同じ理由）
+                    urdfElement.robot.updateMatrixWorld(true);
+
+                    const closed = gripperProfile.isClosed(drivingJoint.angle);
+                    const heldId = heldObjectIdRef.current;
+
+                    if (closed && !heldId) {
+                        // matrixWorld（列優先4x4）でローカル点[ox,oy,oz]をワールド座標に変換する
+                        const toWorld = (m: number[], ox: number, oy: number, oz: number): [number, number, number] => [
+                            m[0] * ox + m[4] * oy + m[8] * oz + m[12],
+                            m[1] * ox + m[5] * oy + m[9] * oz + m[13],
+                            m[2] * ox + m[6] * oy + m[10] * oz + m[14],
+                        ];
+
+                        const [gox, goy, goz] = gripperProfile.attachLinkLocalOffset ?? [0, 0, 0];
+                        const [ax, ay, az] = toWorld(attachLink.matrixWorld.elements, gox, goy, goz);
+                        const radius = gripperProfile.graspRadius;
+                        let nearest: typeof obstacles[number] | null = null;
+                        let nearestDistSq = radius * radius;
+                        for (const obj of obstacles) {
+                            const [cox, coy, coz] = obj.centerOffset;
+                            const [ox2, oy2, oz2] = toWorld(obj.mesh.matrixWorld.elements, cox, coy, coz);
+                            const dx2 = ox2 - ax, dy2 = oy2 - ay, dz2 = oz2 - az;
+                            const distSq = dx2 * dx2 + dy2 * dy2 + dz2 * dz2;
+                            if (distSq < nearestDistSq) {
+                                nearestDistSq = distSq;
+                                nearest = obj;
+                            }
+                        }
+                        if (nearest) {
+                            attachLink.attach(nearest.mesh);
+                            heldObjectIdRef.current = nearest.id;
+
+                            // シミュレータならではの厳密な位置情報を使い、物体の中心
+                            // (centerOffset) が attachLinkLocalOffset にぴったり一致するよう
+                            // ローカル位置を補正する（回転・スケールはそのまま維持）
+                            const THREE = threeRef.current;
+                            if (THREE) {
+                                const target = new THREE.Vector3(gox, goy, goz);
+                                const rotatedScaledCenter = new THREE.Vector3(...nearest.centerOffset)
+                                    .multiply(nearest.mesh.scale)
+                                    .applyQuaternion(nearest.mesh.quaternion);
+                                nearest.mesh.position.copy(target).sub(rotatedScaledCenter);
+
+                                // 把持中オブジェクトを囲むハイライト表示を追加
+                                const helper = new THREE.BoxHelper(nearest.mesh, 0xffdd00);
+                                urdfElement.scene.add(helper);
+                                heldBoxHelperRef.current = helper;
+                            }
+                        }
+                    } else if (!closed && heldId) {
+                        releaseHeldObject();
+                    }
+
+                    // 把持中はハイライト枠を毎フレーム追従させる
+                    heldBoxHelperRef.current?.update();
+                }
+            }
+
             if (scanCounter++ % 3 === 0) {
               // renderer.render() より前なので matrixWorld が古い。
               // transformDirection が正しく動くよう事前に更新する。
@@ -795,7 +890,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
 
     animate(performance.now());
     return () => cancelAnimationFrame(animationFrameId);
-  }, [scene, obstacles, cmdVelRef, jointPositionsRef, needsUpdateRef, simulateLidar, publishScan, publishTF]); 
+  }, [scene, obstacles, cmdVelRef, jointPositionsRef, needsUpdateRef, simulateLidar, publishScan, publishTF, releaseHeldObject]); 
 
   return (
     <div className="h-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg overflow-hidden flex flex-col shadow-sm relative">
