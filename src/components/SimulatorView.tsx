@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { X } from 'lucide-react';
 import type * as THREE from 'three';
 import { useROS } from '../hooks/useROS';
-import { useWorldManager } from '../hooks/useWorldManager';
+import { useWorldManager, toLayoutEntry } from '../hooks/useWorldManager';
 import { useLidarSim } from '../hooks/useLidarSim';
 import { detectGripperProfile, type GripperProfile } from '../hooks/gripperProfiles';
 
@@ -234,6 +234,18 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   const isRestoringRef = useRef(false);
   const obstaclesInitRef = useRef(true);
 
+  // ワールド起動（ONESTAGE_WORLD）モードでは環境・ポーズの自動保存キーを
+  // ワールドごとに分ける。引数なしのときは従来のキーのまま。
+  const envStorageKeyRef = useRef(STORAGE_ENV_KEY);
+  const poseStorageKeyRef = useRef(STORAGE_POSE_KEY);
+  // ONESTAGE_WORLD で指定された SDF のワークスペース相対パス（未指定なら null）
+  const worldPathRef = useRef<string | null>(null);
+  // ワールド／launch で与えられたロボット初期姿勢（リセット時の戻り先）
+  const initialRobotPoseRef = useRef({ x: 0, y: 0, yaw: 0 });
+  // ONESTAGE_SPAWN 由来の初期姿勢上書き（SDF の robot マーカーより優先。未指定なら null）
+  const spawnOverrideRef = useRef<{ x: number; y: number; yaw: number } | null>(null);
+  const [worldMode, setWorldMode] = useState(false);
+
   const [groundColor, setGroundColor] = useState(
     () => localStorage.getItem(STORAGE_GROUND_COLOR_KEY) || '#e8e8e8'
   );
@@ -266,15 +278,31 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     heldObjectIdRef.current = null;
   }, [obstacles]);
 
-  const resetPose = () => {
-    currentPoseRef.current = { x: 0, y: 0, yaw: 0 };
+  // ワールド／launch 由来のロボット初期姿勢を適用する（リセット時の戻り先も更新）
+  const applyRobotPose = useCallback((pose: { x: number; y: number; yaw: number } | null) => {
+    const home = pose ?? { x: 0, y: 0, yaw: 0 };
+    initialRobotPoseRef.current = { ...home };
+    currentPoseRef.current = { ...home };
+    odomOriginRef.current = { ...home };
+    const urdfElement = viewerRef.current as any;
+    if (urdfElement?.robot) {
+      urdfElement.robot.position.set(home.x, home.y, 0);
+      urdfElement.robot.rotation.z = home.yaw;
+    }
+  }, []);
+
+  // ロボットの位置・速度・一時停止状態を初期姿勢に戻す（オブジェクトはそのまま）
+  const resetRobot = () => {
+    const home = initialRobotPoseRef.current;
+    currentPoseRef.current = { ...home };
+    odomOriginRef.current = { ...home };
     cmdVelRef.current = { linearX: 0, angularZ: 0 };
     isPausedRef.current = false;
     setIsPaused(false);
     const urdfElement = viewerRef.current as any;
     if (urdfElement?.robot) {
-      urdfElement.robot.position.set(0, 0, 0);
-      urdfElement.robot.rotation.z = 0;
+      urdfElement.robot.position.set(home.x, home.y, 0);
+      urdfElement.robot.rotation.z = home.yaw;
     }
   };
 
@@ -475,6 +503,124 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     }
   }, []);
 
+  // convert-sdf の結果を Three.js シーンに配置する共通処理。
+  // origin（基準位置）と userYaw（基準まわりの回転）を指定でき、
+  //  - 手動配置: クリック位置 + ホイールの yaw
+  //  - ワールド起動: origin=(0,0,0), userYaw=0（＝SDF 原点をシーン原点に合わせる）
+  // 追加できた各オブジェクトの保存用エントリ配列を返す。
+  const placeSdfObjects = useCallback(async (
+    data: any,
+    origin: { x: number; y: number; z: number },
+    userYaw: number,
+  ): Promise<ReturnType<typeof toLayoutEntry>[]> => {
+    const THREE = threeRef.current;
+    if (!THREE) return [];
+    const hostname = window.location.hostname;
+    const cosY = Math.cos(userYaw), sinY = Math.sin(userYaw);
+    const entries: ReturnType<typeof toLayoutEntry>[] = [];
+
+    await Promise.all((data.objects ?? []).map(async (obj: any) => {
+      const [sx = 0, sy = 0, sz = 0, , , yaw = 0] = obj.pose as number[];
+      // SDF Z-up → Y-up 変換後の相対位置を userYaw で回転
+      const relX = sx, relZ = -sy;
+      const pos: [number, number, number] = [
+        relX * cosY + relZ * sinY + origin.x,
+        sz + origin.y,
+        -relX * sinY + relZ * cosY + origin.z,
+      ];
+      const rotY = yaw;
+
+      if (obj.type === 'mesh') {
+        const meshUrl = `http://${hostname}:8000${obj.url}`;
+        // userYaw × sdfYaw × orientFix
+        const orientQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
+        const sdfYawQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotY);
+        const userYawQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), userYaw);
+        const euler = new THREE.Euler().setFromQuaternion(
+          new THREE.Quaternion().multiplyQuaternions(userYawQ, sdfYawQ).multiply(orientQ), 'XYZ'
+        );
+        const added = await addWorldModel(meshUrl, pos, [euler.x, euler.y, euler.z], obj.scale ?? [1, 1, 1]);
+        if (added) entries.push(toLayoutEntry(added));
+      } else {
+        let geo: import('three').BufferGeometry | null = null;
+        let uri = '';
+        if (obj.type === 'cylinder') {
+          const r = obj.radius as number, l = obj.length as number;
+          geo = new THREE.CylinderGeometry(r, r, l, 16);
+          uri = `primitive://cylinder?r=${r}&l=${l}`;
+        } else if (obj.type === 'box') {
+          const [bx, by, bz] = obj.size as number[];
+          geo = new THREE.BoxGeometry(bx, bz, by);
+          uri = `primitive://box?x=${bx}&y=${bz}&z=${by}`;
+        } else if (obj.type === 'sphere') {
+          const r = obj.radius as number;
+          geo = new THREE.SphereGeometry(r, 16, 12);
+          uri = `primitive://sphere?r=${r}`;
+        }
+        if (geo && uri) {
+          const mat = new THREE.MeshPhongMaterial({ color: obj.color ?? 0x8899aa });
+          const added = addBuiltMesh(new THREE.Mesh(geo, mat), obj.name, pos, [0, rotY + userYaw, 0], uri);
+          if (added) entries.push(toLayoutEntry(added));
+        }
+      }
+    }));
+    return entries;
+  }, [addWorldModel, addBuiltMesh]);
+
+  // ワールド（.sdf/.world）をシーン原点基準で読み込む。
+  // 追加エントリと、SDF から拾ったロボット初期姿勢（無ければ null）を返す。
+  const loadWorldFromSdf = useCallback(async (
+    filePath: string,
+  ): Promise<{ objects: ReturnType<typeof toLayoutEntry>[]; robot: { x: number; y: number; yaw: number } | null }> => {
+    const hostname = window.location.hostname;
+    const res = await fetch(`http://${hostname}:8000/api/convert-sdf?path=${encodeURIComponent(filePath)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'SDF読み込みエラー');
+    const objects = await placeSdfObjects(data, { x: 0, y: 0, z: 0 }, 0);
+    let robot: { x: number; y: number; yaw: number } | null = null;
+    if (Array.isArray(data.robotPose)) {
+      const rp = data.robotPose as number[];
+      robot = { x: rp[0] ?? 0, y: rp[1] ?? 0, yaw: rp[5] ?? 0 };
+    }
+    return { objects, robot };
+  }, [placeSdfObjects]);
+
+  // ワールド起動モードで「最初の状態」に戻す。スナップショットを破棄し、
+  // ロボットもオブジェクトも SDF の初期状態から再構築する。
+  const resetTrial = useCallback(async () => {
+    const wp = worldPathRef.current;
+    if (!wp) return;
+    if (!window.confirm('ロボットとオブジェクトをワールドの初期状態に戻します。編集内容は破棄されます。よろしいですか？')) return;
+    localStorage.removeItem(envStorageKeyRef.current);
+    localStorage.removeItem(poseStorageKeyRef.current);
+    cmdVelRef.current = { linearX: 0, angularZ: 0 };
+    isPausedRef.current = false;
+    setIsPaused(false);
+    releaseHeldObject();
+    clearObstacles();
+    try {
+      isRestoringRef.current = true;
+      const { objects, robot } = await loadWorldFromSdf(wp);
+      isRestoringRef.current = false;
+      const spawn = spawnOverrideRef.current ?? robot;
+      applyRobotPose(spawn);
+      localStorage.setItem(envStorageKeyRef.current, JSON.stringify({ objects, robot: spawn }));
+      localStorage.setItem(poseStorageKeyRef.current, JSON.stringify(currentPoseRef.current));
+    } catch (e) {
+      isRestoringRef.current = false;
+      console.error(e);
+      alert('ワールドの再読み込みに失敗しました。');
+    }
+  }, [clearObstacles, releaseHeldObject, loadWorldFromSdf, applyRobotPose, cmdVelRef]);
+
+  // 「↩ リセット」ボタンの実処理。
+  //  - ワールド起動モード: 部屋ごと初期状態に戻す（resetTrial）
+  //  - それ以外: ロボット姿勢のみリセット（オブジェクトは手動配置なので触らない）
+  const handleReset = () => {
+    if (worldPathRef.current) { resetTrial(); return; }
+    resetRobot();
+  };
+
   const handlePlacementClick = useCallback(async () => {
     if (!placement || !ghostRef.current || !threeRef.current) return;
     // 配置モード開始から500ms以内のクリックは無視（ファイル選択のダブルクリック対策）
@@ -510,62 +656,18 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
       // SDF モデルをクリック位置にオフセット + userYaw で配置
       exitPlacement();
       const hostname = window.location.hostname;
-      const userYaw = placementYawRef.current;
-      const cosY = Math.cos(userYaw), sinY = Math.sin(userYaw);
       try {
         const res = await fetch(
           `http://${hostname}:8000/api/convert-sdf?path=${encodeURIComponent(placement.filePath)}`
         );
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'SDF読み込みエラー');
-        let loaded = 0;
-        for (const obj of (data.objects ?? [])) {
-          const [sx = 0, sy = 0, sz = 0, , , yaw = 0] = obj.pose as number[];
-          // SDF Z-up → Y-up 変換後の相対位置を userYaw で回転
-          // (three.js の rotation.y=θ は local +X を world (cosθ,0,-sinθ) に写すため、
-          //  オブジェクト自身の向き(rotY)の回転方向と合わせてこの符号にする)
-          const relX = sx, relZ = -sy;
-          const pos: [number, number, number] = [
-            relX * cosY + relZ * sinY + p.x,
-            (sz) + p.y,
-            -relX * sinY + relZ * cosY + p.z,
-          ];
-          const rotY = yaw;
-          if (obj.type === 'mesh') {
-            const meshUrl = `http://${hostname}:8000${obj.url}`;
-            // userYaw × sdfYaw × orientFix
-            const orientQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
-            const sdfYawQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotY);
-            const userYawQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), userYaw);
-            const euler = new THREE.Euler().setFromQuaternion(
-              new THREE.Quaternion().multiplyQuaternions(userYawQ, sdfYawQ).multiply(orientQ), 'XYZ'
-            );
-            addWorldModel(meshUrl, pos, [euler.x, euler.y, euler.z], obj.scale ?? [1, 1, 1]);
-            loaded++;
-          } else {
-            let geo: import('three').BufferGeometry | null = null;
-            let uri = '';
-            if (obj.type === 'cylinder') {
-              const r = obj.radius as number, l = obj.length as number;
-              geo = new THREE.CylinderGeometry(r, r, l, 16);
-              uri = `primitive://cylinder?r=${r}&l=${l}`;
-            } else if (obj.type === 'box') {
-              const [bx, by, bz] = obj.size as number[];
-              geo = new THREE.BoxGeometry(bx, bz, by);
-              uri = `primitive://box?x=${bx}&y=${bz}&z=${by}`;
-            } else if (obj.type === 'sphere') {
-              const r = obj.radius as number;
-              geo = new THREE.SphereGeometry(r, 16, 12);
-              uri = `primitive://sphere?r=${r}`;
-            }
-            if (geo && uri) {
-              const mat = new THREE.MeshPhongMaterial({ color: obj.color ?? 0x8899aa });
-              addBuiltMesh(new THREE.Mesh(geo, mat), obj.name, pos, [0, rotY + userYaw, 0], uri);
-              loaded++;
-            }
-          }
-        }
-        if (loaded === 0) alert('SDF から配置できる要素がありませんでした。');
+        const entries = await placeSdfObjects(
+          data,
+          { x: p.x, y: p.y, z: p.z },
+          placementYawRef.current,
+        );
+        if (entries.length === 0) alert('SDF から配置できる要素がありませんでした。');
       } catch (e) {
         console.error(e);
         alert('SDF の読み込みに失敗しました。');
@@ -573,7 +675,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
       return; // exitPlacement は上で呼び済み
     }
     exitPlacement();
-  }, [placement, addBuiltMesh, addWorldModel, exitPlacement]);
+  }, [placement, addBuiltMesh, addWorldModel, placeSdfObjects, exitPlacement]);
 
   // ESC でキャンセル
   useEffect(() => {
@@ -692,16 +794,76 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     initViewer();
   }, [onSceneReady]);
 
-  // シーン準備完了時に保存済み状態を復元する
+  // シーン準備完了時の状態復元。
+  //  - ONESTAGE_WORLD あり: スナップショットがあれば中断直前から継続、無ければ SDF から組み立て
+  //  - なし: 従来どおり localStorage(onestage_ros_environment) から復元
   useEffect(() => {
     if (!isLoaded) return;
-
-    try {
-      const raw = localStorage.getItem(STORAGE_POSE_KEY);
-      if (raw) currentPoseRef.current = JSON.parse(raw);
-    } catch {}
+    const hostname = window.location.hostname;
 
     (async () => {
+      let cfg: {
+        world?: string | null;
+        fingerprint?: string;
+        error?: string;
+        spawn?: { x: number; y: number; yaw: number } | null;
+      } = {};
+      try {
+        const r = await fetch(`http://${hostname}:8000/api/world-config`);
+        cfg = await r.json();
+      } catch {}
+      if (cfg.error) console.warn('[world]', cfg.error);
+      spawnOverrideRef.current = cfg.spawn ?? null;
+
+      if (cfg.world) {
+        worldPathRef.current = cfg.world;
+        setWorldMode(true);
+        envStorageKeyRef.current = `onestage_ros_env::${cfg.world}::${cfg.fingerprint ?? ''}`;
+        poseStorageKeyRef.current = `onestage_ros_pose::${cfg.world}`;
+
+        const snapshot = localStorage.getItem(envStorageKeyRef.current);
+        if (snapshot) {
+          // 中断リカバリ: スナップショットから継続
+          try {
+            const data = JSON.parse(snapshot);
+            isRestoringRef.current = true;
+            await loadEnvironment(data);
+            isRestoringRef.current = false;
+            // spawn（ONESTAGE_SPAWN > スナップショット）を土台に、あればライブ pose で上書き
+            let pose = spawnOverrideRef.current ?? data.robot ?? null;
+            try {
+              const raw = localStorage.getItem(poseStorageKeyRef.current);
+              if (raw) pose = JSON.parse(raw);
+            } catch {}
+            applyRobotPose(pose);
+          } catch {
+            isRestoringRef.current = false;
+          }
+        } else {
+          // 初回: SDF から組み立て → 完成スナップショットを即保存
+          try {
+            isRestoringRef.current = true;
+            const { objects, robot } = await loadWorldFromSdf(cfg.world);
+            isRestoringRef.current = false;
+            const spawn = spawnOverrideRef.current ?? robot;
+            applyRobotPose(spawn);
+            localStorage.setItem(envStorageKeyRef.current, JSON.stringify({ objects, robot: spawn }));
+            localStorage.setItem(poseStorageKeyRef.current, JSON.stringify(currentPoseRef.current));
+          } catch (e) {
+            isRestoringRef.current = false;
+            console.error('[world] SDF ロード失敗', e);
+          }
+        }
+        return;
+      }
+
+      // 従来モード（ONESTAGE_WORLD なし）
+      // ONESTAGE_SPAWN だけ指定されたケースは初期姿勢に反映（ライブ pose があれば復元優先）
+      if (spawnOverrideRef.current) applyRobotPose(spawnOverrideRef.current);
+      try {
+        const raw = localStorage.getItem(STORAGE_POSE_KEY);
+        if (raw) currentPoseRef.current = JSON.parse(raw);
+      } catch {}
       try {
         const raw = localStorage.getItem(STORAGE_ENV_KEY);
         if (raw) {
@@ -715,10 +877,10 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     })();
   }, [isLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ポーズを1秒ごとに自動保存
+  // ポーズを1秒ごとに自動保存（キーはワールドごと / 引数なしなら従来キー）
   useEffect(() => {
     const id = setInterval(() => {
-      localStorage.setItem(STORAGE_POSE_KEY, JSON.stringify(currentPoseRef.current));
+      localStorage.setItem(poseStorageKeyRef.current, JSON.stringify(currentPoseRef.current));
     }, 1000);
     return () => clearInterval(id);
   }, []);
@@ -727,13 +889,9 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   useEffect(() => {
     if (obstaclesInitRef.current) { obstaclesInitRef.current = false; return; }
     if (isRestoringRef.current) return;
-    localStorage.setItem(STORAGE_ENV_KEY, JSON.stringify({
-      objects: obstacles.map(obj => ({
-        name: obj.name,
-        uri: obj.sourceUrl,
-        pose: [...obj.position, ...obj.rotation],
-        ...(obj.meshScale ? { scale: obj.meshScale } : {}),
-      }))
+    localStorage.setItem(envStorageKeyRef.current, JSON.stringify({
+      objects: obstacles.map(toLayoutEntry),
+      robot: initialRobotPoseRef.current,
     }));
   }, [obstacles]);
 
@@ -910,7 +1068,10 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
             {isPaused ? '▶ 再開' : '⏸ 停止'}
           </button>
           <button
-            onClick={resetPose}
+            onClick={handleReset}
+            title={worldMode
+              ? 'ロボットとオブジェクトをワールドの初期状態に戻す'
+              : 'ロボットの位置をリセット'}
             className="text-xs bg-gray-500 hover:bg-gray-600 text-white px-3 py-1.5 rounded shadow-sm font-medium transition-colors"
           >
             ↩ リセット

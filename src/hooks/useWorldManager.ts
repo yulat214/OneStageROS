@@ -17,6 +17,17 @@ export type EnvObject = {
   centerOffset: [number, number, number];
 };
 
+// EnvObject を保存用（environment_layout.json / localStorage スナップショット）の
+// エントリに変換する。exportEnvironment・自動保存・ワールド初回ロードで共有。
+export function toLayoutEntry(obj: EnvObject) {
+  return {
+    name: obj.name,
+    uri: obj.sourceUrl,
+    pose: [...obj.position, ...obj.rotation],
+    ...(obj.meshScale ? { scale: obj.meshScale } : {}),
+  };
+}
+
 // mesh のローカル座標系でのバウンディングボックス中心を求める。
 // position/rotation/scale を設定する「前」（変形が単位行列の状態）で呼ぶこと。
 function computeLocalCenterOffset(mesh: THREE.Object3D): [number, number, number] {
@@ -62,12 +73,17 @@ export function useWorldManager(scene: THREE.Scene | null) {
     }
   }, [scene, obstacles]);
 
-  const addWorldModel = useCallback(async (url: string, pos = [0, 0, 0], rot = [0, 0, 0], meshScale?: number[]) => {
-    if (!scene) return;
+  // メッシュを読み込んで obstacles に追加する。
+  // ロード完了（または対応外拡張子・失敗）で解決する Promise を返し、
+  // 追加された EnvObject（失敗時 null）を渡す。呼び出し側が
+  // 「全部載り終わった」タイミングを掴めるようにするため。
+  const addWorldModel = useCallback(async (url: string, pos = [0, 0, 0], rot = [0, 0, 0], meshScale?: number[]): Promise<EnvObject | null> => {
+    if (!scene) return null;
     const ext = url.split('.').pop()?.toLowerCase();
     const fileName = url.split('/').pop() || 'Unknown Model';
 
-    const onLoad = (mesh: THREE.Object3D) => {
+    // 読み込んだ mesh をシーンに追加して EnvObject を登録する
+    const commit = (mesh: THREE.Object3D): EnvObject => {
       // 変形（position/rotation/scale）を適用する前、原点=単位行列の状態で
       // ローカルのバウンディングボックス中心を求める
       const centerOffset = computeLocalCenterOffset(mesh);
@@ -91,7 +107,7 @@ export function useWorldManager(scene: THREE.Scene | null) {
 
       scene.add(mesh);
 
-      setObstacles((prev) => [...prev, {
+      const newObj: EnvObject = {
         id: crypto.randomUUID(),
         name: fileName,
         mesh,
@@ -100,52 +116,70 @@ export function useWorldManager(scene: THREE.Scene | null) {
         rotation: rot,
         meshScale,
         centerOffset,
-      }]);
+      };
+      setObstacles((prev) => [...prev, newObj]);
+      return newObj;
     };
 
-    if (ext === 'dae') {
-      const { ColladaLoader } = await import('three/addons/loaders/ColladaLoader.js');
-      new ColladaLoader().load(url, (result: any) => onLoad(result.scene));
-    } else if (ext === 'glb' || ext === 'gltf') {
-      const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
-      new GLTFLoader().load(url, (result: any) => onLoad(result.scene));
-    } else if (ext === 'stl') {
-      const { STLLoader } = await import('three/addons/loaders/STLLoader.js');
-      new STLLoader().load(url, (geometry: THREE.BufferGeometry) => {
-        const material = new THREE.MeshPhongMaterial({ color: 0x888888 });
-        onLoad(new THREE.Mesh(geometry, material));
-      });
-    } else if (ext === 'obj') {
-      const { OBJLoader } = await import('three/addons/loaders/OBJLoader.js');
-      const objLoader = new OBJLoader();
-
-      // .obj は mtllib 行が参照する .mtl（同ディレクトリ相対）にテクスチャ/マテリアルが
-      // 外出しされている（DAE/GLTFと違い自己完結しない）ため、先に .mtl を読んでから
-      // OBJLoader に適用する。mtllib が無い/読めない場合はジオメトリのみで続行する。
+    // 各ローダーを Promise 化し、ロード完了で mesh を返す（失敗・非対応なら null）
+    const loadMesh = async (): Promise<THREE.Object3D | null> => {
       try {
-        const baseUrl = url.substring(0, url.lastIndexOf('/') + 1);
-        const objText = await fetch(url).then((r) => r.text());
-        const mtlName = objText.match(/^mtllib\s+(.+)$/m)?.[1]?.trim();
-        if (mtlName) {
-          const { MTLLoader } = await import('three/addons/loaders/MTLLoader.js');
-          const mtlLoader = new MTLLoader();
-          mtlLoader.setPath(baseUrl);
-          const materials = await mtlLoader.loadAsync(mtlName);
-          materials.preload();
-          objLoader.setMaterials(materials);
+        if (ext === 'dae') {
+          const { ColladaLoader } = await import('three/addons/loaders/ColladaLoader.js');
+          return await new Promise<THREE.Object3D | null>((res) =>
+            new ColladaLoader().load(url, (r: any) => res(r.scene), undefined, () => res(null)));
+        }
+        if (ext === 'glb' || ext === 'gltf') {
+          const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
+          return await new Promise<THREE.Object3D | null>((res) =>
+            new GLTFLoader().load(url, (r: any) => res(r.scene), undefined, () => res(null)));
+        }
+        if (ext === 'stl') {
+          const { STLLoader } = await import('three/addons/loaders/STLLoader.js');
+          return await new Promise<THREE.Object3D | null>((res) =>
+            new STLLoader().load(url, (g: THREE.BufferGeometry) =>
+              res(new THREE.Mesh(g, new THREE.MeshPhongMaterial({ color: 0x888888 }))), undefined, () => res(null)));
+        }
+        if (ext === 'obj') {
+          const { OBJLoader } = await import('three/addons/loaders/OBJLoader.js');
+          const objLoader = new OBJLoader();
+
+          // .obj は mtllib 行が参照する .mtl（同ディレクトリ相対）にテクスチャ/マテリアルが
+          // 外出しされている（DAE/GLTFと違い自己完結しない）ため、先に .mtl を読んでから
+          // OBJLoader に適用する。mtllib が無い/読めない場合はジオメトリのみで続行する。
+          try {
+            const baseUrl = url.substring(0, url.lastIndexOf('/') + 1);
+            const objText = await fetch(url).then((r) => r.text());
+            const mtlName = objText.match(/^mtllib\s+(.+)$/m)?.[1]?.trim();
+            if (mtlName) {
+              const { MTLLoader } = await import('three/addons/loaders/MTLLoader.js');
+              const mtlLoader = new MTLLoader();
+              mtlLoader.setPath(baseUrl);
+              const materials = await mtlLoader.loadAsync(mtlName);
+              materials.preload();
+              objLoader.setMaterials(materials);
+            }
+          } catch {
+            // マテリアル読込に失敗してもジオメトリだけは表示できるようにする
+          }
+
+          return await new Promise<THREE.Object3D | null>((res) =>
+            objLoader.load(url, (o: any) => res(o), undefined, () => res(null)));
         }
       } catch {
-        // マテリアル読込に失敗してもジオメトリだけは表示できるようにする
+        // 動的 import の失敗など
       }
+      return null;
+    };
 
-      objLoader.load(url, (obj: any) => onLoad(obj));
-    }
+    const mesh = await loadMesh();
+    return mesh ? commit(mesh) : null;
   }, [scene]);
 
   // プリミティブなど事前生成済みメッシュを obstacles として登録する
   // primitiveUri: 'primitive://cylinder?r=0.15&l=0.5' のようなジオメトリ情報入り URI
-  const addBuiltMesh = useCallback((mesh: THREE.Object3D, name: string, pos: number[], rot: number[], primitiveUri: string) => {
-    if (!scene) return;
+  const addBuiltMesh = useCallback((mesh: THREE.Object3D, name: string, pos: number[], rot: number[], primitiveUri: string): EnvObject | null => {
+    if (!scene) return null;
     const centerOffset = computeLocalCenterOffset(mesh);
     mesh.position.set(pos[0], pos[1], pos[2]);
     mesh.rotation.set(rot[0], rot[1], rot[2]);
@@ -153,7 +187,7 @@ export function useWorldManager(scene: THREE.Scene | null) {
       if (child.isMesh) { child.castShadow = true; child.receiveShadow = true; }
     });
     scene.add(mesh);
-    setObstacles(prev => [...prev, {
+    const newObj: EnvObject = {
       id: crypto.randomUUID(),
       name,
       mesh,
@@ -161,7 +195,9 @@ export function useWorldManager(scene: THREE.Scene | null) {
       position: pos,
       rotation: rot,
       centerOffset,
-    }]);
+    };
+    setObstacles(prev => [...prev, newObj]);
+    return newObj;
   }, [scene]);
 
   // primitive:// URI からメッシュを再生成して追加する（ロード時に使用）
@@ -197,14 +233,7 @@ export function useWorldManager(scene: THREE.Scene | null) {
   }, [scene, addBuiltMesh]);
 
   const exportEnvironment = useCallback(() => {
-    const exportData = {
-      objects: obstacles.map(obj => ({
-        name: obj.name,
-        uri: obj.sourceUrl,
-        pose: [...obj.position, ...obj.rotation],
-        ...(obj.meshScale ? { scale: obj.meshScale } : {}),
-      }))
-    };
+    const exportData = { objects: obstacles.map(toLayoutEntry) };
 
     const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -223,7 +252,9 @@ export function useWorldManager(scene: THREE.Scene | null) {
     clearObstacles();
     console.log(`📂 Restoring ${data.objects.length} objects...`);
 
-    for (const obj of data.objects) {
+    // 全オブジェクトを並行ロードし、全部の完了を待ってから解決する
+    // （呼び出し側が「復元し終わった」タイミングを掴めるようにするため）
+    await Promise.all(data.objects.map(async (obj: any) => {
       try {
         const pos = obj.pose.slice(0, 3);
         const rot = obj.pose.slice(3, 6);
@@ -238,7 +269,7 @@ export function useWorldManager(scene: THREE.Scene | null) {
       } catch (err) {
         console.error(`Failed to restore object: ${obj.name}`, err);
       }
-    }
+    }));
     console.log('Environment restoration complete.');
   }, [clearObstacles, addWorldModel, restorePrimitive]);
 

@@ -252,7 +252,16 @@ app.get('/api/convert-sdf', async (req, res) => {
 
         if (sdf.world) {
             const world = sdf.world[0];
-            for (const m   of (world.model   || [])) processModel(m, [0,0,0,0,0,0]);
+            for (const m of (world.model || [])) {
+                // "robot" / "spawn" という名前のモデルはロボット配置マーカー扱い。
+                // visual は描画せず pose だけを初期姿勢として拾う（座標合わせ用）。
+                const mName = (m.$?.name || '').toLowerCase();
+                if (mName === 'robot' || mName === 'spawn') {
+                    if (robotPose === null) robotPose = parsePose(m.pose?.[0]);
+                    continue;
+                }
+                processModel(m, [0,0,0,0,0,0]);
+            }
             for (const inc of (world.include  || [])) {
                 processInclude(inc, [0,0,0,0,0,0]);
                 // 最初の非静的 include の pose をロボット初期位置候補として収集
@@ -277,6 +286,39 @@ app.get('/api/convert-sdf', async (req, res) => {
 
 app.get('/api/session', (req, res) => {
     res.json({ sessionId: SESSION_ID });
+});
+
+// 起動時に環境変数で渡されたワールド設定を返す。
+//  ONESTAGE_WORLD: ワールドファイル（ROS launch の `world:=` 相当）。未指定なら world:null
+//    world       -> /api/convert-sdf にそのまま渡せるワークスペース相対パス
+//    fingerprint -> ファイル更新でフロント側スナップショットを破棄するための識別子
+//  ONESTAGE_SPAWN: "x y yaw"（m / rad, 区切りは空白かカンマ）。ロボット初期姿勢を
+//    SDF の robot マーカーより優先して上書きする。spawn:{x,y,yaw} で返す
+function parseSpawnEnv(raw) {
+    if (!raw) return null;
+    const n = String(raw).trim().split(/[\s,]+/).map(Number);
+    if (n.length < 2 || n.slice(0, 2).some(Number.isNaN)) return null;
+    return { x: n[0], y: n[1], yaw: Number.isFinite(n[2]) ? n[2] : 0 };
+}
+
+app.get('/api/world-config', (req, res) => {
+    const spawn = parseSpawnEnv(process.env.ONESTAGE_SPAWN);
+    const raw = process.env.ONESTAGE_WORLD;
+    if (!raw) return res.json({ world: null, spawn });
+    try {
+        const abs = path.isAbsolute(raw)
+            ? path.resolve(raw)
+            : path.resolve(WORKSPACE_ROOT, raw);
+        assertWithinWorkspace(abs);
+        if (!fs.existsSync(abs)) {
+            return res.json({ world: null, spawn, error: `ONESTAGE_WORLD が見つかりません: ${raw}` });
+        }
+        const stat = fs.statSync(abs);
+        const relPath = path.relative(WORKSPACE_ROOT, abs);
+        res.json({ world: relPath, fingerprint: `${stat.size}-${Math.floor(stat.mtimeMs)}`, spawn });
+    } catch (e) {
+        res.status(e.status || 500).json({ error: e.message });
+    }
 });
 
 // ROS 再接続時にフロントエンドから呼ばれる URDF 再同期エンドポイント
