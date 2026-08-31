@@ -140,7 +140,7 @@ export const BuildPanel = forwardRef<BuildPanelHandle>((_, ref) => {
       failed:   { cls: 'bg-red-100 text-red-700', label: '失敗' },
     }[status];
     if (!cfg) return null;
-    return <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${cfg.cls}`}>{cfg.label}</span>;
+    return <span className={`text-sm font-medium px-2 py-0.5 rounded-full ${cfg.cls}`}>{cfg.label}</span>;
   };
 
   const entryClass = (type: LogEntry['type'], text: string) => {
@@ -159,7 +159,7 @@ export const BuildPanel = forwardRef<BuildPanelHandle>((_, ref) => {
         {/* 左: 展開トグル + タイトル + バッジ */}
         <button
           onClick={() => setIsExpanded(e => !e)}
-          className="flex items-center gap-2 text-sm font-medium text-gray-700 hover:text-gray-900 shrink-0"
+          className="flex items-center gap-2 text-base font-medium text-gray-700 hover:text-gray-900 shrink-0"
         >
           {isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
           <Hammer className="w-4 h-4" />
@@ -167,7 +167,7 @@ export const BuildPanel = forwardRef<BuildPanelHandle>((_, ref) => {
         </button>
         {statusBadge()}
         {isRunning && (
-          <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-purple-100 text-purple-700">実行中...</span>
+          <span className="text-sm font-medium px-2 py-0.5 rounded-full bg-purple-100 text-purple-700">実行中...</span>
         )}
 
         {/* 中央: ワークスペース（常時表示） */}
@@ -175,7 +175,7 @@ export const BuildPanel = forwardRef<BuildPanelHandle>((_, ref) => {
           value={workspace}
           onChange={e => { setWorkspace(e.target.value); localStorage.setItem('build_workspace', e.target.value); }}
           onClick={e => e.stopPropagation()}
-          className="flex-1 min-w-0 border border-gray-300 rounded px-2 py-1 text-xs font-mono"
+          className="flex-1 min-w-0 border border-gray-300 rounded px-2 py-1 text-sm font-mono"
           placeholder="ビルドするワークスペースを入力してください（例：~/ros2_ws）"
         />
 
@@ -192,7 +192,7 @@ export const BuildPanel = forwardRef<BuildPanelHandle>((_, ref) => {
           {isBusy ? (
             <button
               onClick={handleCancel}
-              className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-red-500 text-white rounded hover:bg-red-600"
+              className="flex items-center gap-1 px-2.5 py-1 text-sm font-medium bg-red-500 text-white rounded hover:bg-red-600"
             >
               <X className="w-3 h-3" />
               中断
@@ -200,7 +200,7 @@ export const BuildPanel = forwardRef<BuildPanelHandle>((_, ref) => {
           ) : (
             <button
               onClick={handleBuild}
-              className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-green-600 text-white rounded hover:bg-green-700"
+              className="flex items-center gap-1 px-2.5 py-1 text-sm font-medium bg-green-600 text-white rounded hover:bg-green-700"
             >
               <Hammer className="w-3 h-3" />
               実行
@@ -211,7 +211,7 @@ export const BuildPanel = forwardRef<BuildPanelHandle>((_, ref) => {
 
       {/* 詳細オプション */}
       {showOptions && (
-        <div className="px-4 py-3 bg-gray-50 border-t border-gray-100 flex flex-col gap-2 text-xs">
+        <div className="px-4 py-3 bg-gray-50 border-t border-gray-100 flex flex-col gap-2 text-sm">
           <div className="flex items-center gap-2">
             <span className="text-gray-600 w-36 flex-shrink-0">パッケージ名（任意）</span>
             <input
@@ -273,7 +273,7 @@ export const BuildPanel = forwardRef<BuildPanelHandle>((_, ref) => {
 
       {/* ログエリア */}
       {isExpanded && (
-        <div className="h-52 overflow-y-auto bg-[#1e1e1e] font-mono text-xs p-2 leading-relaxed">
+        <div className="h-52 overflow-y-auto bg-[#1e1e1e] font-mono text-sm p-2 leading-relaxed">
           {logs.length === 0 && status === 'building' && (
             <span className="text-gray-500 animate-pulse">ビルド開始中...</span>
           )}

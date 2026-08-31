@@ -102,16 +102,16 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({ filePath, onSaveSuccess 
   return (
     <div className="w-full h-full flex flex-col bg-white">
       <div className="flex items-center justify-between px-4 py-2 border-b border-gray-200 bg-white">
-        <div className="flex items-center gap-2 text-sm text-gray-600">
+        <div className="flex items-center gap-2 text-base text-gray-600">
           <FileCode className="w-4 h-4" />
           {filePath ? `~/${filePath}` : '未選択'}
-          {isLoading && <span className="text-xs text-gray-400 ml-2">読み込み中...</span>}
+          {isLoading && <span className="text-sm text-gray-400 ml-2">読み込み中...</span>}
         </div>
 
         <button
           onClick={handleSave}
           disabled={!filePath || isSaving || isLoading}
-          className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded transition-colors ${saveButtonClass()}`}
+          className={`flex items-center gap-1.5 px-3 py-1.5 text-sm font-bold rounded transition-colors ${saveButtonClass()}`}
         >
           {saveButtonIcon()}
           {saveButtonLabel()}

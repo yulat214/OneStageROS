@@ -92,7 +92,7 @@ export default function App() {
           <div className="flex-1 md:max-w-[60%] flex flex-col min-h-0 min-w-0 bg-white rounded-lg border border-gray-200 shadow-sm">
             <SimulatorView onSceneReady={setSharedScene} />
           </div>
-          <aside className="flex flex-col md:flex-1 gap-4 min-h-0">
+          <aside className="flex flex-col md:flex-1 gap-4 min-h-0 min-w-0">
             <div className="flex-1 min-h-[250px] bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
               <RobotCameraView scene={sharedScene} />
             </div>

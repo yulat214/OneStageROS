@@ -284,31 +284,31 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
     <div className="h-full w-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg overflow-hidden flex flex-col shadow-sm">
       <div className="bg-gray-100 dark:bg-gray-700 px-3 py-1.5 border-b border-gray-300 dark:border-gray-600 flex items-center gap-2 flex-shrink-0 flex-wrap">
         <Video className="w-4 h-4 text-green-600 dark:text-green-400 flex-shrink-0" />
-        <h2 className="text-sm text-gray-700 dark:text-gray-300">カメラビュー</h2>
+        <h2 className="text-base text-gray-700 dark:text-gray-300">カメラビュー</h2>
         <select
           value={mode}
           onChange={e => handleModeChange(e.target.value as CameraMode)}
-          className="ml-1 text-xs bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-500 rounded px-1 py-0.5 text-gray-700 dark:text-gray-300"
+          className="ml-1 text-sm bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-500 rounded px-1 py-0.5 text-gray-700 dark:text-gray-300"
         >
           <option value="robot">ロボットカメラ</option>
           <option value="free">フリービュー</option>
         </select>
         {mode === 'free' && (
           <>
-            <span className="text-xs text-gray-400 dark:text-gray-500">ドラッグ:回転 Shift:移動 ホイール:ズーム</span>
+            <span className="text-sm text-gray-400 dark:text-gray-500">ドラッグ:回転 Shift:移動 ホイール:ズーム</span>
             <button
               onClick={handleSave}
-              className={`ml-auto text-xs px-2 py-0.5 rounded border transition-colors ${
+              className={`ml-auto text-sm px-2 py-0.5 rounded border transition-colors ${
                 saved
                   ? 'bg-green-100 dark:bg-green-900 border-green-400 text-green-700 dark:text-green-300'
                   : 'bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-500 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-600'
               }`}
             >
-              {saved ? '保存済み ✓' : '視点を保存'}
+              {saved ? '保存済み' : '視点を保存'}
             </button>
           </>
         )}
-        <span className={`${mode === 'free' ? '' : 'ml-auto'} text-xs flex items-center gap-1 ${statusLive ? 'text-green-600 dark:text-green-400' : 'text-gray-400 dark:text-gray-500'}`}>
+        <span className={`${mode === 'free' ? '' : 'ml-auto'} text-sm flex items-center gap-1 ${statusLive ? 'text-green-600 dark:text-green-400' : 'text-gray-400 dark:text-gray-500'}`}>
           <span className={`w-2 h-2 rounded-full ${statusLive ? 'bg-green-500 animate-pulse' : 'bg-gray-400 dark:bg-gray-500'}`} />
           {statusText}
         </span>

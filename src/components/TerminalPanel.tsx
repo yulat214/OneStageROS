@@ -119,7 +119,7 @@ export const TerminalPanel: React.FC<Props> = ({ isOpen, height, onClose, onHeig
       </div>
       {/* ヘッダー */}
       <div className="flex items-center justify-between px-3 py-1.5 bg-gray-50 flex-shrink-0 border-b border-gray-200">
-        <div className="flex items-center gap-2 text-gray-600 text-xs font-medium">
+        <div className="flex items-center gap-2 text-gray-600 text-sm font-medium">
           <TerminalIcon className="w-3.5 h-3.5" />
           ターミナル
         </div>

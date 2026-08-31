@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { X } from 'lucide-react';
+import { X, ChevronDown } from 'lucide-react';
 import type * as THREE from 'three';
 import { useROS } from '../hooks/useROS';
 import { useWorldManager, toLayoutEntry } from '../hooks/useWorldManager';
@@ -27,7 +27,14 @@ interface SimulatorViewProps {
 type PlacementKind =
   | { type: 'primitive'; geoType: 'box' | 'cylinder' | 'sphere' }
   | { type: 'sdf'; filePath: string }
-  | { type: 'mesh'; url: string };
+  | { type: 'mesh'; url: string }
+  | { type: 'move'; objectId: string };
+
+// 建物の固定要素（壁・床・天井など）は名前で判定し、クリック選択・移動の対象外にする。
+// building_editor の wall_0/visual や floor_1 / ceiling / roof といったモデル名を想定
+// （前後が英字でない = 単語として一致。"wallet" などは対象外）。
+const isLockedObject = (name: string) =>
+  /(^|[^a-z])(wall|floor|ceiling|roof|ground)([^a-z]|$)/i.test(name);
 
 // サーバー内のファイルを取得・表示するサブコンポーネント
 function ServerFileBrowser({
@@ -89,13 +96,13 @@ function ServerFileBrowser({
       <div className="bg-white dark:bg-gray-800 w-96 h-[70vh] rounded-xl shadow-2xl flex flex-col overflow-hidden border border-gray-200 dark:border-gray-700" onClick={e => e.stopPropagation()}>
 
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
-          <span className="font-medium text-sm text-gray-800 dark:text-gray-100">{title}</span>
+          <span className="font-medium text-base text-gray-800 dark:text-gray-100">{title}</span>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 rounded p-0.5 transition-colors">
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        <div className="px-3 py-1 bg-gray-50 dark:bg-gray-900 text-[10px] text-gray-400 truncate flex-shrink-0">
+        <div className="px-3 py-1 bg-gray-50 dark:bg-gray-900 text-xs text-gray-400 truncate flex-shrink-0">
           /{currentPath}
         </div>
 
@@ -134,10 +141,11 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   const [isLoaded, setIsLoaded] = useState(false);
   const [scene, setScene] = useState<THREE.Scene | null>(null); 
   const [isFileBrowserOpen, setIsFileBrowserOpen] = useState(false);
-  const [isObjectListOpen, setIsObjectListOpen] = useState(false); // 個別削除メニューの開閉状態
+  const [isEditorOpen, setIsEditorOpen] = useState(false); // ワールド編集パネルの開閉
+  const [isObjListOpen, setIsObjListOpen] = useState(false); // 編集パネル内「オブジェクト」の折りたたみ
 
   const { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, publishTF, initialPoseRef } = useROS(jointTopic);
-  const { obstacles, addWorldModel, addBuiltMesh, removeObjectById, clearObstacles, exportEnvironment, loadEnvironment } = useWorldManager(scene);
+  const { obstacles, addWorldModel, addBuiltMesh, removeObjectById, updateObjectPose, clearObstacles, exportEnvironment, loadEnvironment } = useWorldManager(scene);
   const { simulateLidar } = useLidarSim();
 
   // rosbridge 自体が落ちたとき（稀）にビューアを消す
@@ -228,6 +236,24 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   const [placementYawDeg, setPlacementYawDeg] = useState(0);
   const isPausedRef = useRef(false);
 
+  // 移動モード中の対象と、キャンセル用の元姿勢スナップショット
+  const moveStateRef = useRef<{
+    id: string;
+    mesh: import('three').Object3D;
+    origPos: import('three').Vector3;
+    origQuat: import('three').Quaternion;
+  } | null>(null);
+
+  // 3D ビュー上でオブジェクトを直接クリックしたときのコンテキストメニュー
+  // （x/y はビュー左上基準のピクセル座標）
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; id: string; name: string } | null>(null);
+  const selectBoxHelperRef = useRef<import('three').BoxHelper | null>(null);
+  // ビュー上の pointerdown 座標（ドラッグ＝カメラ操作 と クリック＝選択 の判別用）
+  const viewPointerDownRef = useRef<{ x: number; y: number } | null>(null);
+  // アニメーションループから最新の obstacles を参照するためのミラー
+  const obstaclesRef = useRef(obstacles);
+  obstaclesRef.current = obstacles;
+
   const STORAGE_POSE_KEY = 'onestage_ros_pose';
   const STORAGE_ENV_KEY = 'onestage_ros_environment';
   const STORAGE_GROUND_COLOR_KEY = 'onestage_ros_ground_color';
@@ -306,7 +332,59 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     }
   };
 
+  // オブジェクト選択（コンテキストメニュー）の解除とハイライト除去
+  const clearSelection = useCallback(() => {
+    const viewer = viewerRef.current as any;
+    if (selectBoxHelperRef.current) {
+      viewer?.scene?.remove(selectBoxHelperRef.current);
+      (selectBoxHelperRef.current as any).dispose?.();
+      selectBoxHelperRef.current = null;
+    }
+    setCtxMenu(null);
+  }, []);
+
+  // ビュー座標 (clientX/Y) にあるオブジェクトを拾ってコンテキストメニューを開く。
+  // 当たらなければ選択解除。
+  const selectObjectAt = useCallback((clientX: number, clientY: number, rect: DOMRect) => {
+    const THREE = threeRef.current;
+    const viewer = viewerRef.current as any;
+    if (!THREE || !viewer?.camera || !viewer?.scene) return;
+
+    const nx = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const ny = -((clientY - rect.top) / rect.height) * 2 + 1;
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(new THREE.Vector2(nx, ny), viewer.camera);
+
+    // 壁など固定オブジェクトはクリック選択の対象外
+    const candidates = obstaclesRef.current.filter(o => !isLockedObject(o.name));
+    const hits = raycaster.intersectObjects(candidates.map(o => o.mesh), true);
+    if (hits.length === 0) { clearSelection(); return; }
+
+    // ヒットした子孫から所属する EnvObject（トップの mesh）を辿る
+    let node: any = hits[0].object;
+    let owner: (typeof candidates)[number] | undefined;
+    while (node && !owner) {
+      owner = candidates.find(o => o.mesh === node);
+      node = node.parent;
+    }
+    if (!owner) { clearSelection(); return; }
+
+    if (selectBoxHelperRef.current) {
+      viewer.scene.remove(selectBoxHelperRef.current);
+      (selectBoxHelperRef.current as any).dispose?.();
+    }
+    const helper = new THREE.BoxHelper(owner.mesh, 0x3b82f6);
+    viewer.scene.add(helper);
+    selectBoxHelperRef.current = helper;
+
+    // メニューがビュー外にはみ出さないよう軽くクランプ
+    const x = Math.min(clientX - rect.left, rect.width - 196);
+    const y = Math.min(clientY - rect.top, rect.height - 124);
+    setCtxMenu({ x: Math.max(0, x), y: Math.max(0, y), id: owner.id, name: owner.name });
+  }, [clearSelection]);
+
   const enterPlacement = async (kind: PlacementKind) => {
+    clearSelection();
     const THREE = await import('three');
     threeRef.current = THREE;
     const viewer = viewerRef.current as any;
@@ -315,6 +393,13 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     // ヤウをリセット
     placementYawRef.current = 0;
     setPlacementYawDeg(0);
+
+    // 進行中の移動モードがあれば元に戻してから
+    if (moveStateRef.current) {
+      moveStateRef.current.mesh.position.copy(moveStateRef.current.origPos);
+      moveStateRef.current.mesh.quaternion.copy(moveStateRef.current.origQuat);
+      moveStateRef.current = null;
+    }
 
     // 既存ゴーストを除去
     if (ghostRef.current) {
@@ -329,6 +414,33 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
 
     if (viewer.controls) viewer.controls.enabled = false;
     overlayPointerDownRef.current = false;
+
+    if (kind.type === 'move') {
+      // 既存オブジェクトを掴んでカーソル追従。ゴーストは作らず実メッシュを直接動かす
+      // （ghostRef は null のまま = exitPlacement の dispose 対象にしない）
+      const target = obstacles.find(o => o.id === kind.objectId);
+      if (!target) { if (viewer.controls) viewer.controls.enabled = true; return; }
+      if (heldObjectIdRef.current === kind.objectId) {
+        if (viewer.controls) viewer.controls.enabled = true;
+        alert('把持中のオブジェクトは移動できません。');
+        return;
+      }
+      if (isLockedObject(target.name)) {
+        if (viewer.controls) viewer.controls.enabled = true;
+        alert('壁など固定オブジェクトは移動できません。');
+        return;
+      }
+      moveStateRef.current = {
+        id: kind.objectId,
+        mesh: target.mesh,
+        origPos: target.mesh.position.clone(),
+        origQuat: target.mesh.quaternion.clone(),
+      };
+      setPlacement(kind);
+      placementEntryTimeRef.current = Date.now();
+      return;
+    }
+
     const ghostMat = () => new THREE.MeshPhongMaterial({ color: 0x4488ff, opacity: 0.6, transparent: true });
 
     if (kind.type === 'primitive') {
@@ -474,16 +586,50 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     setPlacement(null);
   }, []);
 
+  // 移動モードの終了。commit=true で新しい姿勢を確定、false で元に戻す。
+  const exitMove = useCallback((commit: boolean) => {
+    const mv = moveStateRef.current;
+    const viewer = viewerRef.current as any;
+    if (mv) {
+      if (commit) {
+        updateObjectPose(
+          mv.id,
+          [mv.mesh.position.x, mv.mesh.position.y, mv.mesh.position.z],
+          [mv.mesh.rotation.x, mv.mesh.rotation.y, mv.mesh.rotation.z],
+        );
+      } else {
+        mv.mesh.position.copy(mv.origPos);
+        mv.mesh.quaternion.copy(mv.origQuat);
+      }
+    }
+    moveStateRef.current = null;
+    if (viewer?.controls) viewer.controls.enabled = true;
+    setPlacement(null);
+  }, [updateObjectPose]);
+
+  // yaw を移動対象メッシュ（あれば）／ゴーストに反映する共通処理
+  const applyPlacementYaw = useCallback(() => {
+    const mv = moveStateRef.current;
+    const THREE = threeRef.current;
+    if (mv && THREE) {
+      // 元の姿勢に yaw 分を上乗せ（複合回転のメッシュでも破綻しないよう quaternion で合成）
+      const yawQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), placementYawRef.current);
+      mv.mesh.quaternion.copy(yawQ).multiply(mv.origQuat);
+    } else if (ghostRef.current) {
+      ghostRef.current.rotation.y = placementYawRef.current;
+    }
+  }, []);
+
   const handlePlacementWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
     e.preventDefault();
     placementYawRef.current -= e.deltaY * 0.004;
-    if (ghostRef.current) ghostRef.current.rotation.y = placementYawRef.current;
+    applyPlacementYaw();
     setPlacementYawDeg(Math.round(placementYawRef.current * (180 / Math.PI)));
-  }, []);
+  }, [applyPlacementYaw]);
 
   const handlePlacementMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    if (!ghostRef.current || !threeRef.current || !groundMeshRef.current) return;
     const THREE = threeRef.current;
+    if (!THREE || !groundMeshRef.current) return;
     const viewer = viewerRef.current as any;
     if (!viewer?.camera) return;
 
@@ -494,14 +640,24 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     const raycaster = new THREE.Raycaster();
     raycaster.setFromCamera(new THREE.Vector2(nx, ny), viewer.camera);
     const hits = raycaster.intersectObject(groundMeshRef.current);
-    if (hits.length > 0) {
-      const p = hits[0].point;
+    if (hits.length === 0) return;
+    const p = hits[0].point;
+
+    const mv = moveStateRef.current;
+    if (mv) {
+      // 移動モード: XZ をカーソル追従、高さ(Y)は元のまま維持、yaw は元姿勢に上乗せ
+      mv.mesh.position.set(p.x, mv.origPos.y, p.z);
+      applyPlacementYaw();
+      return;
+    }
+
+    if (ghostRef.current) {
       // シーン未追加（モデル非同期ロード後）なら初回ヒット時に追加
       if (!ghostRef.current.parent) viewer.scene.add(ghostRef.current);
       ghostRef.current.position.set(p.x, p.y, p.z);
       ghostRef.current.rotation.y = placementYawRef.current;
     }
-  }, []);
+  }, [applyPlacementYaw]);
 
   // convert-sdf の結果を Three.js シーンに配置する共通処理。
   // origin（基準位置）と userYaw（基準まわりの回転）を指定でき、
@@ -597,6 +753,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     isPausedRef.current = false;
     setIsPaused(false);
     releaseHeldObject();
+    clearSelection();
     clearObstacles();
     try {
       isRestoringRef.current = true;
@@ -611,9 +768,9 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
       console.error(e);
       alert('ワールドの再読み込みに失敗しました。');
     }
-  }, [clearObstacles, releaseHeldObject, loadWorldFromSdf, applyRobotPose, cmdVelRef]);
+  }, [clearObstacles, clearSelection, releaseHeldObject, loadWorldFromSdf, applyRobotPose, cmdVelRef]);
 
-  // 「↩ リセット」ボタンの実処理。
+  // 「リセット」ボタンの実処理。
   //  - ワールド起動モード: 部屋ごと初期状態に戻す（resetTrial）
   //  - それ以外: ロボット姿勢のみリセット（オブジェクトは手動配置なので触らない）
   const handleReset = () => {
@@ -622,12 +779,19 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   };
 
   const handlePlacementClick = useCallback(async () => {
-    if (!placement || !ghostRef.current || !threeRef.current) return;
-    // 配置モード開始から500ms以内のクリックは無視（ファイル選択のダブルクリック対策）
+    if (!placement) return;
+    // 配置モード開始から500ms以内のクリックは無視（ボタン/ファイル選択のダブルクリック対策）
     if (Date.now() - placementEntryTimeRef.current < 500) return;
     // オーバーレイ上で pointerdown が起きていない場合も無視
     if (!overlayPointerDownRef.current) return;
     overlayPointerDownRef.current = false;
+
+    if (placement.type === 'move') {
+      exitMove(true);
+      return;
+    }
+
+    if (!ghostRef.current || !threeRef.current) return;
     const THREE = threeRef.current;
     const p = ghostRef.current.position;
 
@@ -675,15 +839,29 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
       return; // exitPlacement は上で呼び済み
     }
     exitPlacement();
-  }, [placement, addBuiltMesh, addWorldModel, placeSdfObjects, exitPlacement]);
+  }, [placement, addBuiltMesh, addWorldModel, placeSdfObjects, exitPlacement, exitMove]);
+
+  // 配置／移動モードのキャンセル（ESC・右クリック共通）
+  const cancelPlacement = useCallback(() => {
+    if (moveStateRef.current) exitMove(false);
+    else exitPlacement();
+  }, [exitMove, exitPlacement]);
 
   // ESC でキャンセル
   useEffect(() => {
     if (!placement) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') exitPlacement(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') cancelPlacement(); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [placement, exitPlacement]);
+  }, [placement, cancelPlacement]);
+
+  // ESC でコンテキストメニューを閉じる
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') clearSelection(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [ctxMenu, clearSelection]);
 
   const handleFileSelect = (filePath: string) => {
     setIsFileBrowserOpen(false);
@@ -1040,6 +1218,9 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
               publishScan(scanData, frameStampMs);
             }
 
+            // 選択ハイライトを追従させる
+            selectBoxHelperRef.current?.update();
+
             if (urdfElement.renderer && urdfElement.scene && urdfElement.camera) {
                 urdfElement.renderer.render(urdfElement.scene, urdfElement.camera);
             }
@@ -1055,140 +1236,187 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
       
       {/* ヘッダー部分 */}
       <div className="bg-gray-100 dark:bg-gray-700 px-4 py-2 border-b border-gray-300 dark:border-gray-600 flex justify-between items-center z-20">
-        <h2 className="text-sm font-medium text-gray-700 dark:text-gray-300">メインシミュレータビュー</h2>
+        <h2 className="text-base font-medium text-gray-700 dark:text-gray-300">メインシミュレータビュー</h2>
         <div className="flex gap-3 items-center">
           <button
             onClick={togglePause}
-            className={`text-xs px-3 py-1.5 rounded shadow-sm font-medium transition-colors ${
+            className={`text-sm px-3 py-1.5 rounded shadow-sm font-medium transition-colors ${
               isPaused
                 ? 'bg-green-500 hover:bg-green-600 text-white'
                 : 'bg-yellow-500 hover:bg-yellow-600 text-white'
             }`}
           >
-            {isPaused ? '▶ 再開' : '⏸ 停止'}
+            {isPaused ? '再開' : '停止'}
           </button>
           <button
             onClick={handleReset}
             title={worldMode
               ? 'ロボットとオブジェクトをワールドの初期状態に戻す'
               : 'ロボットの位置をリセット'}
-            className="text-xs bg-gray-500 hover:bg-gray-600 text-white px-3 py-1.5 rounded shadow-sm font-medium transition-colors"
+            className="text-sm bg-gray-500 hover:bg-gray-600 text-white px-3 py-1.5 rounded shadow-sm font-medium transition-colors"
           >
-            ↩ リセット
+            リセット
           </button>
           <button
-            onClick={exportEnvironment}
-            className="text-xs bg-blue-500 hover:bg-blue-600 text-white px-3 py-1.5 rounded shadow-sm flex items-center transition-colors"
+            onClick={() => setIsEditorOpen(v => !v)}
+            className={`text-sm px-3 py-1.5 rounded shadow-sm font-medium transition-colors ${
+              isEditorOpen
+                ? 'bg-indigo-700 hover:bg-indigo-800 text-white ring-2 ring-indigo-300 dark:ring-indigo-500'
+                : 'bg-indigo-500 hover:bg-indigo-600 text-white'
+            }`}
           >
-            💾 配置を保存
+            ワールド編集
           </button>
-          <label className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded shadow-sm cursor-pointer transition-all">
-            📂 配置呼び出し
-            <input 
-              type="file" 
-              accept=".json" 
-              className="hidden" 
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (!file) return;
-
-                const reader = new FileReader();
-                reader.onload = (event) => {
-                  try {
-                    const json = JSON.parse(event.target?.result as string);
-                    loadEnvironment(json);
-                  } catch (err) {
-                    alert("JSONの解析に失敗しました。");
-                  }
-                };
-                reader.readAsText(file);
-                e.target.value = '';
-              }} 
-            />
-          </label>
-          <label className="text-xs flex items-center gap-1.5 bg-white dark:bg-gray-600 px-2 py-1 rounded shadow-sm border border-gray-200 dark:border-gray-500 text-gray-700 dark:text-gray-200 cursor-pointer">
-            地面の色
-            <input
-              type="color"
-              value={groundColor}
-              onChange={(e) => handleGroundColorChange(e.target.value)}
-              className="w-6 h-5 p-0 border-0 bg-transparent cursor-pointer"
-              title="地面の色を変更"
-            />
-          </label>
-          <div className="text-xs px-2 py-1 rounded bg-white dark:bg-gray-600 shadow-sm border border-gray-200 dark:border-gray-500">
+          <div className="text-sm px-2 py-1 rounded bg-white dark:bg-gray-600 shadow-sm border border-gray-200 dark:border-gray-500">
             Status: <span className={rosStatus === 'Connected' ? 'text-green-600 font-bold' : 'text-red-500'}>{rosStatus}</span>
           </div>
         </div>
       </div>
-      
-      <div className="flex-1 relative bg-gray-50 overflow-hidden">
-        
-        {/* メイン操作ボタン群（右上） */}
-        <div className="absolute top-4 right-4 z-10 flex flex-col gap-2 items-end">
 
-          <button
-            onClick={() => setIsFileBrowserOpen(prev => !prev)}
-            className="bg-white hover:bg-gray-50 dark:bg-gray-700 dark:hover:bg-gray-600 border border-gray-200 dark:border-gray-600 text-gray-700 dark:text-gray-200 px-4 py-2 rounded shadow-md text-xs font-medium transition-colors"
-          >
-            {isFileBrowserOpen ? "✕ ファイルを閉じる" : "📂 ファイルから配置"}
-          </button>
+      <div
+        className="flex-1 relative bg-gray-50 overflow-hidden"
+        onPointerDown={(e) => {
+          if (placement) return;
+          if ((e.target as HTMLElement).closest?.('[data-sim-chrome]')) { viewPointerDownRef.current = null; return; }
+          viewPointerDownRef.current = { x: e.clientX, y: e.clientY };
+        }}
+        onPointerUp={(e) => {
+          const down = viewPointerDownRef.current;
+          viewPointerDownRef.current = null;
+          if (placement || !down) return;
+          // 移動量が大きければカメラ操作とみなして無視
+          if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 6) return;
+          if ((e.target as HTMLElement).closest?.('[data-sim-chrome]')) return;
+          selectObjectAt(e.clientX, e.clientY, e.currentTarget.getBoundingClientRect());
+        }}
+      >
 
-          {/* プリミティブ形状配置ボタン */}
-          <div className="flex gap-1">
-            {(['box', 'cylinder', 'sphere'] as const).map(g => (
-              <button
-                key={g}
-                onClick={() => enterPlacement({ type: 'primitive', geoType: g })}
-                title={`${g} を配置`}
-                className="bg-white hover:bg-gray-50 dark:bg-gray-700 dark:hover:bg-gray-600 border border-gray-200 dark:border-gray-600 text-gray-700 dark:text-gray-200 px-3 py-2 rounded shadow-md text-xs font-medium transition-colors"
-              >
-                {g === 'box' ? '□ Box' : g === 'cylinder' ? '⬭ Cyl' : '○ Sph'}
+        {/* ワールド編集パネル */}
+        {isEditorOpen && (
+          <div data-sim-chrome className="absolute top-4 right-4 z-20 w-80 max-h-[calc(100%-2rem)] flex flex-col bg-gray-100 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between px-3.5 py-2.5 bg-white dark:bg-gray-800 border-b border-gray-300 dark:border-gray-700 flex-shrink-0">
+              <span className="text-sm font-semibold text-gray-700 dark:text-gray-200">ワールド編集</span>
+              <button onClick={() => setIsEditorOpen(false)} className="text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 rounded p-0.5 transition-colors">
+                <X className="w-4 h-4" />
               </button>
-            ))}
-          </div>
+            </div>
 
-          <button
-            onClick={() => setIsObjectListOpen(prev => !prev)}
-            className={`px-4 py-2 rounded shadow-md text-xs font-medium transition-colors border ${
-              isObjectListOpen 
-              ? "bg-amber-50 border-amber-200 text-amber-700" 
-              : "bg-white hover:bg-gray-50 border-gray-200 text-gray-700 dark:bg-gray-700 dark:border-gray-600 dark:text-gray-200"
-            }`}
-          >
-            {isObjectListOpen ? "✕ 削除メニューを閉じる" : "✂️ 選択したオブジェクトを削除"}
-          </button>
+            <div className="flex-1 min-h-0 overflow-y-auto p-3.5 space-y-5">
 
-          <button 
-            onClick={clearObstacles}
-            className="bg-red-50 hover:bg-red-100 border border-red-200 text-red-600 px-4 py-2 rounded shadow-md text-xs font-medium transition-colors mt-2"
-          >
-            🗑️ すべてのオブジェクトを消去
-          </button>
-        </div>
-
-        {/* 個別削除用オーバーレイメニュー */}
-        {isObjectListOpen && (
-          <div className="absolute top-4 left-4 z-30 w-56 bg-white/90 dark:bg-gray-800/90 backdrop-blur border border-gray-200 dark:border-gray-700 rounded-lg shadow-xl overflow-hidden">
-
-            <div className="max-h-60 overflow-y-auto p-1">
-              {obstacles.length === 0 ? (
-                <div className="text-[11px] text-gray-400 text-center py-4">配置されたオブジェクトはありません</div>
-              ) : (
-                <ul className="space-y-0.5">
-                  {obstacles.map(obj => (
-                    <li key={obj.id} className="flex justify-between items-center hover:bg-red-50 dark:hover:bg-red-900/20 px-2 py-1.5 rounded transition-colors group">
-                      <span className="text-[11px] truncate text-gray-700 dark:text-gray-300 mr-2">{obj.name}</span>
-                      <button 
-                        onClick={() => removeObjectById(obj.id)}
-                        className="text-gray-300 group-hover:text-red-500 transition-colors px-1"
-                      >
-                        🗑️
-                      </button>
-                    </li>
+              {/* 配置 */}
+              <section className="space-y-2">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">配置</h3>
+                <button
+                  onClick={() => setIsFileBrowserOpen(prev => !prev)}
+                  className="w-full bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 dark:bg-indigo-900/30 dark:hover:bg-indigo-900/50 dark:border-indigo-800 dark:text-indigo-300 px-3 py-2 rounded text-sm font-medium shadow-sm transition-colors"
+                >
+                  {isFileBrowserOpen ? "ファイル選択を閉じる" : "ファイルから配置"}
+                </button>
+                <div className="flex gap-1.5">
+                  {(['box', 'cylinder', 'sphere'] as const).map(g => (
+                    <button
+                      key={g}
+                      onClick={() => enterPlacement({ type: 'primitive', geoType: g })}
+                      title={`${g} を配置`}
+                      className="flex-1 bg-white hover:bg-gray-50 dark:bg-gray-700 dark:hover:bg-gray-600 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 px-2 py-2 rounded text-sm font-medium shadow-sm transition-colors"
+                    >
+                      {g === 'box' ? '□ Box' : g === 'cylinder' ? '⬭ Cyl' : '○ Sph'}
+                    </button>
                   ))}
-                </ul>
-              )}
+                </div>
+              </section>
+
+              {/* オブジェクト一覧（折りたたみ・既定は閉じる） */}
+              <section className="space-y-1.5">
+                <button
+                  onClick={() => setIsObjListOpen(prev => !prev)}
+                  className="flex items-center gap-1 w-full text-xs font-semibold uppercase tracking-wide text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+                >
+                  <ChevronDown className={`w-3 h-3 transition-transform ${isObjListOpen ? '' : '-rotate-90'}`} />
+                  オブジェクト{obstacles.length ? ` (${obstacles.length})` : ''}
+                </button>
+                {isObjListOpen && (obstacles.length === 0 ? (
+                  <div className="text-sm text-gray-400 text-center py-3">配置されたオブジェクトはありません</div>
+                ) : (
+                  <ul className="space-y-1">
+                    {obstacles.map(obj => (
+                      <li key={obj.id} className="flex items-center gap-1.5 px-1.5 py-1 rounded hover:bg-white dark:hover:bg-gray-800 transition-colors">
+                        <span className="text-sm truncate text-gray-700 dark:text-gray-300 flex-1" title={obj.name}>{obj.name}</span>
+                        {isLockedObject(obj.name) ? (
+                          <span className="flex-shrink-0 text-xs text-gray-400 px-2 py-1" title="固定（壁・床・天井など）">固定</span>
+                        ) : (
+                          <button
+                            onClick={() => { setIsEditorOpen(false); enterPlacement({ type: 'move', objectId: obj.id }); }}
+                            className="flex-shrink-0 text-xs font-medium px-2 py-1 rounded border border-blue-200 bg-blue-50 text-blue-600 hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-900/30 dark:text-blue-300 dark:hover:bg-blue-900/50 transition-colors"
+                          >
+                            移動
+                          </button>
+                        )}
+                        <button
+                          onClick={() => removeObjectById(obj.id)}
+                          title="削除"
+                          className="flex-shrink-0 text-xs font-medium px-2 py-1 rounded border border-red-200 bg-red-50 text-red-600 hover:bg-red-100 dark:border-red-800 dark:bg-red-900/30 dark:text-red-300 dark:hover:bg-red-900/50 transition-colors"
+                        >
+                          削除
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ))}
+                {isObjListOpen && obstacles.length > 0 && (
+                  <button
+                    onClick={() => { clearSelection(); clearObstacles(); }}
+                    className="w-full text-sm font-medium bg-red-50 hover:bg-red-100 border border-red-200 text-red-600 dark:bg-red-900/20 dark:border-red-800 dark:text-red-300 px-3 py-1.5 rounded transition-colors"
+                  >
+                    すべて消去
+                  </button>
+                )}
+              </section>
+
+              {/* 環境 */}
+              <section className="space-y-2">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">環境</h3>
+                <div className="flex gap-1">
+                  <button
+                    onClick={exportEnvironment}
+                    className="flex-1 text-sm font-medium bg-blue-500 hover:bg-blue-600 text-white px-3 py-1.5 rounded transition-colors"
+                  >
+                    保存
+                  </button>
+                  <label className="flex-1 text-sm font-medium bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded cursor-pointer transition-colors text-center">
+                    呼び出し
+                    <input
+                      type="file"
+                      accept=".json"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        const reader = new FileReader();
+                        reader.onload = (event) => {
+                          try {
+                            loadEnvironment(JSON.parse(event.target?.result as string));
+                          } catch {
+                            alert("JSONの解析に失敗しました。");
+                          }
+                        };
+                        reader.readAsText(file);
+                        e.target.value = '';
+                      }}
+                    />
+                  </label>
+                </div>
+                <label className="flex items-center justify-between text-sm bg-white dark:bg-gray-700 px-2.5 py-1.5 rounded border border-gray-300 dark:border-gray-600 shadow-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                  地面の色
+                  <input
+                    type="color"
+                    value={groundColor}
+                    onChange={(e) => handleGroundColorChange(e.target.value)}
+                    className="w-6 h-5 p-0 border-0 bg-transparent cursor-pointer"
+                    title="地面の色を変更"
+                  />
+                </label>
+              </section>
             </div>
           </div>
         )}
@@ -1205,14 +1433,42 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
           />
         )}
 
+        {/* オブジェクト直接クリックのコンテキストメニュー */}
+        {ctxMenu && !placement && (
+          <div
+            data-sim-chrome
+            className="absolute z-40 min-w-[176px] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-xl overflow-hidden text-sm"
+            style={{ left: ctxMenu.x, top: ctxMenu.y }}
+            onPointerDown={(e) => e.stopPropagation()}
+            onPointerUp={(e) => e.stopPropagation()}
+          >
+            <div className="px-3 py-1.5 border-b border-gray-100 dark:border-gray-700 text-xs font-medium text-gray-500 dark:text-gray-400 truncate">
+              {ctxMenu.name}
+            </div>
+            <button
+              onClick={() => { const id = ctxMenu.id; clearSelection(); enterPlacement({ type: 'move', objectId: id }); }}
+              className="block w-full text-left px-3 py-2 text-gray-700 dark:text-gray-200 hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-colors"
+            >
+              移動
+            </button>
+            <button
+              onClick={() => { removeObjectById(ctxMenu.id); clearSelection(); }}
+              className="block w-full text-left px-3 py-2 text-red-600 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/30 transition-colors"
+            >
+              削除
+            </button>
+          </div>
+        )}
+
         {/* 配置モードオーバーレイ */}
         {placement && (
           <>
-            <div className="absolute top-2 left-1/2 -translate-x-1/2 z-40 bg-blue-600 text-white text-xs px-4 py-1.5 rounded-full shadow-lg pointer-events-none select-none">
-              クリックで配置 / スクロールで回転 / 右クリック・ESC でキャンセル
+            <div className="absolute top-2 left-1/2 -translate-x-1/2 z-40 bg-blue-600 text-white text-sm px-4 py-1.5 rounded-full shadow-lg pointer-events-none select-none">
+              {placement.type === 'move' ? 'クリックで確定' : 'クリックで配置'} / スクロールで回転 / 右クリック・ESC でキャンセル
               {placement.type === 'sdf' && ` — ${placement.filePath.split('/').pop()}`}
               {placement.type === 'mesh' && ` — ${placement.url.split('/').pop()}`}
               {placement.type === 'primitive' && ` — ${placement.geoType}`}
+              {placement.type === 'move' && ` — 移動`}
               {` [${placementYawDeg}°]`}
             </div>
             <div
@@ -1221,7 +1477,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
               onPointerMove={handlePlacementMove}
               onWheel={handlePlacementWheel}
               onClick={handlePlacementClick}
-              onContextMenu={e => { e.preventDefault(); exitPlacement(); }}
+              onContextMenu={e => { e.preventDefault(); cancelPlacement(); }}
             />
           </>
         )}

@@ -113,7 +113,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, select
     <div className="w-full h-full flex flex-col bg-gray-50 border-r border-gray-200 text-sm">
       {/* ツールバー */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-gray-200 bg-gray-100">
-        <span className="font-semibold text-gray-700 truncate flex-1 text-xs" title={`~/${currentPath}`}>
+        <span className="font-semibold text-gray-700 truncate flex-1 text-sm" title={`~/${currentPath}`}>
           ~/{currentPath || ' (ルート)'}
         </span>
         <div className="flex items-center gap-1 shrink-0">
@@ -156,19 +156,19 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, select
               onChange={e => { setNewFileName(e.target.value); setCreateError(null); }}
               onKeyDown={handleCreateKeyDown}
               onBlur={handleCancelCreate}
-              className="w-full border border-blue-400 rounded px-2 py-1 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-blue-400"
+              className="w-full border border-blue-400 rounded px-2 py-1 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-blue-400"
               placeholder="ファイル名.py（Enter で作成）"
             />
             {createError && (
-              <p className="text-xs text-red-500 mt-1">{createError}</p>
+              <p className="text-sm text-red-500 mt-1">{createError}</p>
             )}
           </div>
         )}
 
         {loading ? (
-          <div className="px-4 py-2 text-gray-400 text-xs">読み込み中...</div>
+          <div className="px-4 py-2 text-gray-400 text-sm">読み込み中...</div>
         ) : items.length === 0 ? (
-          <div className="px-4 py-2 text-gray-400 text-xs">空のフォルダです</div>
+          <div className="px-4 py-2 text-gray-400 text-sm">空のフォルダです</div>
         ) : (
           items.map((item) => (
             <button

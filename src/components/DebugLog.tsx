@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react';
-import { Terminal, Trash2, ChevronRight, ChevronDown, Activity, Languages, Settings, X, BotMessageSquare, Pause, Play } from 'lucide-react';
+import { Terminal, ChevronRight, ChevronDown, Activity, Languages, Settings, X, BotMessageSquare, Pause, Play } from 'lucide-react';
 import * as ROSLIB from 'roslib';
 
 interface SnapshotData {
@@ -208,12 +208,12 @@ export function DebugLog() {
       <div className="bg-gray-100 dark:bg-gray-700 px-3 py-1.5 border-b border-gray-300 dark:border-gray-600 flex flex-col gap-1 flex-shrink-0">
         <div className="flex items-center gap-2">
           <Terminal className="w-4 h-4 text-purple-600 dark:text-purple-400 flex-shrink-0" />
-          <h2 className="text-sm text-gray-700 dark:text-gray-300">
+          <h2 className="text-base text-gray-700 dark:text-gray-300">
             デバッグログ
             {isConnected
-              ? <span className="text-xs ml-2 text-green-500">● 接続中</span>
-              : <span className="text-xs ml-2 text-red-500">● 未接続</span>}
-            {isLogPaused && <span className="text-xs ml-2 text-yellow-500">⏸ 一時停止中</span>}
+              ? <span className="text-sm ml-2 text-green-500">● 接続中</span>
+              : <span className="text-sm ml-2 text-red-500">● 未接続</span>}
+            {isLogPaused && <span className="text-sm ml-2 text-yellow-500">一時停止中</span>}
           </h2>
           <div className="ml-auto flex items-center gap-1">
             {/* 新規ログの一時停止・再開ボタン */}
@@ -232,12 +232,6 @@ export function DebugLog() {
             >
               <BotMessageSquare className="w-5 h-5" />
             </button>
-            <button
-              onClick={() => { setLogs([]); setExpandedLogIds(new Set()); }}
-              className="p-1.5 hover:bg-gray-200 dark:hover:bg-gray-600 rounded transition-colors"
-            >
-              <Trash2 className="w-5 h-5 text-gray-500 dark:text-gray-400" />
-            </button>
           </div>
         </div>
 
@@ -247,13 +241,13 @@ export function DebugLog() {
             <button
               key={level}
               onClick={() => setHiddenLevels(prev => { const n = new Set(prev); n.has(level) ? n.delete(level) : n.add(level); return n; })}
-              className={`text-[10px] px-2 py-0.5 rounded font-bold transition-opacity border border-transparent ${LEVEL_COLORS[level]} ${hiddenLevels.has(level) ? 'opacity-30' : 'opacity-100'}`}
+              className={`text-sm px-2 py-0.5 rounded font-bold transition-opacity border border-transparent ${LEVEL_COLORS[level]} ${hiddenLevels.has(level) ? 'opacity-30' : 'opacity-100'}`}
             >
               {level}
             </button>
           ))}
           {hiddenLevels.size > 0 && (
-            <button onClick={() => setHiddenLevels(new Set())} className="text-[10px] px-2 py-0.5 rounded text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
+            <button onClick={() => setHiddenLevels(new Set())} className="text-sm px-2 py-0.5 rounded text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
               全表示
             </button>
           )}
@@ -261,11 +255,11 @@ export function DebugLog() {
 
         {/* ノードフィルター */}
         <div className="flex items-center gap-2 mt-1">
-          <span className="text-[11px] text-gray-500 dark:text-gray-400 flex-shrink-0">ノード:</span>
+          <span className="text-sm text-gray-500 dark:text-gray-400 flex-shrink-0">ノード:</span>
           <select
             value={nodeFilter}
             onChange={e => setNodeFilter(e.target.value)}
-            className="flex-1 text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200"
+            className="flex-1 text-sm px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200"
           >
             <option value="all">すべて</option>
             {nodeNames.map(n => <option key={n} value={n}>{n}</option>)}
@@ -273,7 +267,7 @@ export function DebugLog() {
           {nodeFilter !== 'all' && (
             <button
               onClick={() => setNodeFilter('all')}
-              className="text-[10px] px-2 py-1 rounded bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600 flex-shrink-0"
+              className="text-sm px-2 py-1 rounded bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600 flex-shrink-0"
             >
               解除
             </button>
@@ -313,7 +307,7 @@ export function DebugLog() {
                     <span className="text-gray-400 dark:text-gray-600 flex-shrink-0">[{log.timestamp}]</span>
                     <span className="font-bold flex-shrink-0 w-12">{style.label}</span>
                     <span className="flex-shrink-0 opacity-70 max-w-[8rem] truncate" title={log.name}>[{log.name}]</span>
-                    <span className="break-words flex-1 text-[1.1em] font-medium">{log.msg}</span>
+                    <span className="break-words flex-1 min-w-0 text-[1.1em] font-medium">{log.msg}</span>
 
                     {/* WARN以上: 前後5件・AI解析ボタン */}
                     {isWarnOrAbove && (
@@ -345,7 +339,7 @@ export function DebugLog() {
                     <div className="ml-6 mt-2 mb-1 space-y-2">
                       {/* AI解析結果 */}
                       {log.aiAnalysis && (
-                        <div className="p-2 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700/50 rounded text-xs text-gray-800 dark:text-gray-200 whitespace-pre-wrap">
+                        <div className="p-2 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700/50 rounded text-xs text-gray-800 dark:text-gray-200 whitespace-pre-wrap break-words">
                           <div className="text-[10px] font-bold text-purple-600 dark:text-purple-400 mb-1 flex items-center gap-1">
                             <BotMessageSquare className="w-3 h-3" /> AI解析
                           </div>
@@ -374,7 +368,7 @@ export function DebugLog() {
                             {log.isTranslating
                               ? <div className="text-gray-500 text-xs animate-pulse">翻訳中...</div>
                               : log.translatedMsg
-                                ? <div className="text-gray-800 dark:text-gray-200 text-xs font-bold whitespace-pre-wrap">{log.translatedMsg}</div>
+                                ? <div className="text-gray-800 dark:text-gray-200 text-xs font-bold whitespace-pre-wrap break-words">{log.translatedMsg}</div>
                                 : <div className="text-gray-400 dark:text-gray-500 text-[10px]">エラー文を日本語に翻訳できます</div>
                             }
                           </div>
@@ -384,19 +378,19 @@ export function DebugLog() {
                             <Activity className="w-3 h-3" /> System Snapshot
                           </div>
                           <div className="grid grid-cols-2 gap-4">
-                            <div>
+                            <div className="min-w-0">
                               <div className="text-gray-500 mb-1">Active Nodes ({log.snapshot.activeNodes?.length || 0}):</div>
-                              <ul className="list-disc list-inside h-24 overflow-y-auto pl-1 bg-gray-50 dark:bg-gray-900 rounded border border-gray-100 dark:border-gray-700 p-1">
+                              <ul className="list-disc list-inside h-24 overflow-auto pl-1 bg-gray-50 dark:bg-gray-900 rounded border border-gray-100 dark:border-gray-700 p-1">
                                 {log.snapshot.activeNodes?.map((n, i) => (
-                                  <li key={i} className={n === log.name ? 'text-yellow-600 dark:text-yellow-400 font-bold' : ''}>{n}</li>
+                                  <li key={i} className={`break-all ${n === log.name ? 'text-yellow-600 dark:text-yellow-400 font-bold' : ''}`}>{n}</li>
                                 ))}
                               </ul>
                             </div>
-                            <div>
+                            <div className="min-w-0">
                               <div className="text-gray-500 mb-1">Active Topics ({log.snapshot.activeTopics?.length || 0}):</div>
-                              <ul className="list-disc list-inside h-24 overflow-y-auto pl-1 bg-gray-50 dark:bg-gray-900 rounded border border-gray-100 dark:border-gray-700 p-1">
+                              <ul className="list-disc list-inside h-24 overflow-auto pl-1 bg-gray-50 dark:bg-gray-900 rounded border border-gray-100 dark:border-gray-700 p-1">
                                 {log.snapshot.activeTopics?.map((t, i) => (
-                                  <li key={i} className="text-blue-600 dark:text-blue-400">{t}</li>
+                                  <li key={i} className="break-all text-blue-600 dark:text-blue-400">{t}</li>
                                 ))}
                               </ul>
                             </div>

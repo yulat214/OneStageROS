@@ -73,6 +73,22 @@ export function useWorldManager(scene: THREE.Scene | null) {
     }
   }, [scene, obstacles]);
 
+  // 配置済みオブジェクトの位置・回転を更新する（移動モードで使用）。
+  // position/rotation はいずれもシーン座標系での [x,y,z] / [rx,ry,rz]（オイラー XYZ）。
+  const updateObjectPose = useCallback((id: string, position: number[], rotation: number[]) => {
+    setObstacles(prev => {
+      let changed = false;
+      const next = prev.map(o => {
+        if (o.id !== id) return o;
+        changed = true;
+        o.mesh.position.set(position[0], position[1], position[2]);
+        o.mesh.rotation.set(rotation[0], rotation[1], rotation[2]);
+        return { ...o, position: [...position], rotation: [...rotation] };
+      });
+      return changed ? next : prev;
+    });
+  }, []);
+
   // メッシュを読み込んで obstacles に追加する。
   // ロード完了（または対応外拡張子・失敗）で解決する Promise を返し、
   // 追加された EnvObject（失敗時 null）を渡す。呼び出し側が
@@ -278,6 +294,7 @@ export function useWorldManager(scene: THREE.Scene | null) {
     addWorldModel,
     addBuiltMesh,
     removeObjectById,
+    updateObjectPose,
     clearObstacles,
     exportEnvironment,
     loadEnvironment,
