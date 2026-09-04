@@ -41,6 +41,7 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
   const opticalLinkRef = useRef<string>('');
   const imageTopicRef = useRef<ROSLIB.Topic<unknown> | null>(null);
   const depthTopicRef = useRef<ROSLIB.Topic<unknown> | null>(null);
+  const cameraInfoTopicRef = useRef<ROSLIB.Topic<unknown> | null>(null);
   const depthMaterialRef = useRef<THREE.MeshDepthMaterial | null>(null);
   const depthTargetRef = useRef<THREE.WebGLRenderTarget | null>(null);
   const modeRef = useRef<CameraMode>('robot');
@@ -95,10 +96,11 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
     ros.on('connection', () => {
       imageTopicRef.current = new ROSLIB.Topic({ ros, name: '/camera/camera/color/image_raw', messageType: 'sensor_msgs/msg/Image' });
       depthTopicRef.current = new ROSLIB.Topic({ ros, name: '/camera/camera/depth/image_rect_raw', messageType: 'sensor_msgs/msg/Image' });
+      cameraInfoTopicRef.current = new ROSLIB.Topic({ ros, name: '/camera/camera/color/camera_info', messageType: 'sensor_msgs/msg/CameraInfo' });
     });
-    ros.on('close', () => { imageTopicRef.current = null; depthTopicRef.current = null; });
-    ros.on('error', () => { imageTopicRef.current = null; depthTopicRef.current = null; });
-    return () => { imageTopicRef.current = null; depthTopicRef.current = null; ros.close(); };
+    ros.on('close', () => { imageTopicRef.current = null; depthTopicRef.current = null; cameraInfoTopicRef.current = null; });
+    ros.on('error', () => { imageTopicRef.current = null; depthTopicRef.current = null; cameraInfoTopicRef.current = null; });
+    return () => { imageTopicRef.current = null; depthTopicRef.current = null; cameraInfoTopicRef.current = null; ros.close(); };
   }, []);
 
   useEffect(() => {
@@ -263,6 +265,23 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
               header: { stamp: { sec: Math.floor(now / 1000), nanosec: (now % 1000) * 1_000_000 }, frame_id: frameId },
               height: h, width: w, encoding: 'rgb8', is_bigendian: 0, step: w * 3, data: btoa(bin),
             });
+
+            if (cameraInfoTopicRef.current) {
+              const vFovRad = camera.fov * Math.PI / 180;
+              const fy = h / (2 * Math.tan(vFovRad / 2));
+              const fx = fy;
+              const cx = w / 2;
+              const cy = h / 2;
+              cameraInfoTopicRef.current.publish({
+                header: { stamp: { sec: Math.floor(now / 1000), nanosec: (now % 1000) * 1_000_000 }, frame_id: frameId },
+                width: w, height: h,
+                distortion_model: 'plumb_bob',
+                d: [0, 0, 0, 0, 0],
+                k: [fx, 0, cx, 0, fy, cy, 0, 0, 1],
+                r: [1, 0, 0, 0, 1, 0, 0, 0, 1],
+                p: [fx, 0, cx, 0, 0, fy, cy, 0, 0, 0, 1, 0],
+              });
+            }
           }
         }
 
