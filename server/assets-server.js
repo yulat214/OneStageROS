@@ -537,7 +537,8 @@ app.post('/api/analyze-log', async (req, res) => {
     const model = process.env.AI_MODEL || 'llama-3.3-70b-versatile';
 
     const logText = logs.map(l => `[${l.level}] [${l.name}] ${l.msg}`).join('\n');
-    const systemPrompt = `ROS 2のデバッグ専門家として、以下のログを読んで日本語で短く答えてください。
+    // 授業などで説明トーンを変えたい場合は AI_SYSTEM_PROMPT で丸ごと差し替え可能
+    const systemPrompt = process.env.AI_SYSTEM_PROMPT || `ROS 2のデバッグ専門家として、以下のログを読んで日本語で短く答えてください。
 
 ルール：
 - マークダウンや番号付きリストは使わない。装飾なしのプレーンテキストで書く

@@ -40,6 +40,9 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
   const applyResizeRef = useRef<(() => void) | null>(null);
   const opticalLinkRef = useRef<string>('');
   const imageTopicRef = useRef<ROSLIB.Topic<unknown> | null>(null);
+  const depthTopicRef = useRef<ROSLIB.Topic<unknown> | null>(null);
+  const depthMaterialRef = useRef<THREE.MeshDepthMaterial | null>(null);
+  const depthTargetRef = useRef<THREE.WebGLRenderTarget | null>(null);
   const modeRef = useRef<CameraMode>('robot');
 
   const initial = loadOrbit();
@@ -90,11 +93,12 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
     const hostname = window.location.hostname;
     const ros = new ROSLIB.Ros({ url: `ws://${hostname}:9090` });
     ros.on('connection', () => {
-      imageTopicRef.current = new ROSLIB.Topic({ ros, name: '/camera/color/image_raw', messageType: 'sensor_msgs/msg/Image' });
+      imageTopicRef.current = new ROSLIB.Topic({ ros, name: '/camera/camera/color/image_raw', messageType: 'sensor_msgs/msg/Image' });
+      depthTopicRef.current = new ROSLIB.Topic({ ros, name: '/camera/camera/depth/image_rect_raw', messageType: 'sensor_msgs/msg/Image' });
     });
-    ros.on('close', () => { imageTopicRef.current = null; });
-    ros.on('error', () => { imageTopicRef.current = null; });
-    return () => { imageTopicRef.current = null; ros.close(); };
+    ros.on('close', () => { imageTopicRef.current = null; depthTopicRef.current = null; });
+    ros.on('error', () => { imageTopicRef.current = null; depthTopicRef.current = null; });
+    return () => { imageTopicRef.current = null; depthTopicRef.current = null; ros.close(); };
   }, []);
 
   useEffect(() => {
@@ -124,6 +128,8 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
       const init2 = loadOrbit();
       const TARGET = new THREE.Vector3(init2.tx, init2.ty, init2.tz);
       targetVecRef.current = TARGET;
+
+      depthMaterialRef.current = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
 
       // --- マウス操作 ---
       const canvas = renderer.domElement;
@@ -233,7 +239,9 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
 
         renderer.render(scene, camera);
 
-        if (++pubCount % PUBLISH_EVERY_N_FRAMES === 0 && imageTopicRef.current) {
+        const shouldPublish = ++pubCount % PUBLISH_EVERY_N_FRAMES === 0;
+
+        if (shouldPublish && imageTopicRef.current) {
           const w = renderer.domElement.width, h = renderer.domElement.height;
           if (w > 0 && h > 0) {
             const gl = renderer.getContext();
@@ -257,6 +265,53 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
             });
           }
         }
+
+        if (shouldPublish && depthTopicRef.current && depthMaterialRef.current) {
+          const w = renderer.domElement.width, h = renderer.domElement.height;
+          if (w > 0 && h > 0) {
+            if (!depthTargetRef.current || depthTargetRef.current.width !== w || depthTargetRef.current.height !== h) {
+              depthTargetRef.current?.dispose();
+              depthTargetRef.current = new THREE.WebGLRenderTarget(w, h);
+            }
+            const target = depthTargetRef.current;
+            const prevOverride = scene.overrideMaterial;
+            scene.overrideMaterial = depthMaterialRef.current;
+            renderer.setRenderTarget(target);
+            renderer.render(scene, camera);
+            renderer.setRenderTarget(null);
+            scene.overrideMaterial = prevOverride;
+
+            const rgba = new Uint8Array(w * h * 4);
+            renderer.readRenderTargetPixels(target, 0, 0, w, h, rgba);
+
+            // three.js RGBADepthPacking: invClipZ = dot(rgba/255, UnpackFactors4)
+            const UnpackDownscale = 255 / 256;
+            const uf0 = UnpackDownscale / 1;
+            const uf1 = UnpackDownscale / 256;
+            const uf2 = UnpackDownscale / 65536;
+            const uf3 = 1 / 16777216;
+            const near = camera.near, far = camera.far;
+            const depthData = new Float32Array(w * h);
+            for (let row = 0; row < h; row++) {
+              const src = h - 1 - row;
+              for (let col = 0; col < w; col++) {
+                const s = (src * w + col) * 4, d = row * w + col;
+                const invClipZ = (rgba[s] / 255) * uf0 + (rgba[s + 1] / 255) * uf1 + (rgba[s + 2] / 255) * uf2 + (rgba[s + 3] / 255) * uf3;
+                const viewZ = (near * far) / ((far - near) * invClipZ - far);
+                depthData[d] = -viewZ;
+              }
+            }
+            const depthBytes = new Uint8Array(depthData.buffer);
+            let depthBin = '';
+            for (let i = 0; i < depthBytes.length; i += 8192) depthBin += String.fromCharCode(...depthBytes.subarray(i, i + 8192));
+            const now = Date.now();
+            const frameId = currentMode === 'robot' ? opticalLinkRef.current : 'free_camera';
+            depthTopicRef.current.publish({
+              header: { stamp: { sec: Math.floor(now / 1000), nanosec: (now % 1000) * 1_000_000 }, frame_id: frameId },
+              height: h, width: w, encoding: '32FC1', is_bigendian: 0, step: w * 4, data: btoa(depthBin),
+            });
+          }
+        }
       };
 
       animate();
@@ -270,6 +325,10 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
       targetVecRef.current = null;
       if (loopId) cancelAnimationFrame(loopId);
       if (resizeObserver) resizeObserver.disconnect();
+      depthTargetRef.current?.dispose();
+      depthTargetRef.current = null;
+      depthMaterialRef.current?.dispose();
+      depthMaterialRef.current = null;
       if (renderer) {
         renderer.dispose();
         renderer.domElement.parentNode?.removeChild(renderer.domElement);
