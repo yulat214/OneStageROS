@@ -17,6 +17,21 @@ export type EnvObject = {
   centerOffset: [number, number, number];
 };
 
+// FBX由来のCOLLADA変換ツールで書き出された.daeには、<transparent>タグ無しで
+// <transparency>0</transparency>だけを持つ個体がある(実例: OpenRobotics/Armchair)。
+// ColladaLoaderはCOLLADA仕様通りに「不透明色(白,alpha=1) × transparency(0)」として
+// 解釈し、opacity=0(完全に透明=見えない)にしてしまう。エクスポータ側の意図はほぼ
+// 確実に「透明度0%=不透明」なので、opacityがちょうど0のケースは不透明に戻す
+// (ガラス等の意図的な半透明はopacityが0にはならないため誤爆しない)。
+function fixBrokenDaeTransparency(material: any) {
+  if (Array.isArray(material)) {
+    material.forEach(fixBrokenDaeTransparency);
+  } else if (material && material.transparent && material.opacity === 0) {
+    material.opacity = 1;
+    material.transparent = false;
+  }
+}
+
 // EnvObject を保存用（environment_layout.json / localStorage スナップショット）の
 // エントリに変換する。exportEnvironment・自動保存・ワールド初回ロードで共有。
 export function toLayoutEntry(obj: EnvObject) {
@@ -118,6 +133,7 @@ export function useWorldManager(scene: THREE.Scene | null) {
         if (child.isMesh) {
           child.castShadow = true;
           child.receiveShadow = true;
+          fixBrokenDaeTransparency(child.material);
         }
       });
 
