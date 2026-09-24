@@ -332,26 +332,80 @@ app.post('/api/sync', async (req, res) => {
 });
 
 // ROS 接続状態を返す（robot.urdf が存在するか＝同期済みか）
+// version は robot.urdf の更新時刻。クライアントはこれが変わったときだけ再ロードする
 app.get('/api/ros/status', (req, res) => {
-    res.json({ connected: fs.existsSync(path.join(ASSETS_DIR, 'robot.urdf')) });
+    try {
+        const stat = fs.statSync(path.join(ASSETS_DIR, 'robot.urdf'));
+        res.json({ connected: true, version: Math.floor(stat.mtimeMs) });
+    } catch {
+        res.json({ connected: false, version: null });
+    }
 });
 
-// ROS ノードの生死を定期監視し、切断時にデータ削除・復活時に再同期する
-let _syncInProgress = false;
-setInterval(() => {
-    if (_syncInProgress) return;
-    exec('ros2 node list', { timeout: 2000 }, (err, stdout) => {
-        const rosUp = !err && stdout.includes('/robot_state_publisher');
-        const urdfExists = fs.existsSync(path.join(ASSETS_DIR, 'robot.urdf'));
+// ROS ノードの生死を定期監視し、robot_state_publisher が落ちて復活したら再同期する。
+// `ros2 node list` は重く（Python 起動 + DDS discovery）、MoveIt/Nav2/RViz が並走すると
+// 数秒かかることがある。失敗・タイムアウトは「不明」として扱い、アセットは消さない
+// （以前はタイムアウト＝切断とみなして ros2_data/ を消しており、ロボットが頻繁に消えていた）。
+// ノード一覧は常駐の rclnodejs ノードから取る（毎回 CLI を起動するより大幅に軽い）。
+// rclnodejs が使えない環境（メッセージ未生成など）では `ros2 node list` にフォールバックする
+let _graphNode = null;
+(async () => {
+    try {
+        const rclnodejs = require('rclnodejs');
+        await rclnodejs.init();
+        _graphNode = rclnodejs.createNode('onestage_graph_monitor');
+        rclnodejs.spin(_graphNode);
+        console.log('[ROS] graph monitor: rclnodejs');
+    } catch (e) {
+        console.warn(`[ROS] rclnodejs unavailable, falling back to "ros2 node list": ${e.message}`);
+    }
+})();
 
-        if (!rosUp && urdfExists) {
-            fs.rmSync(ASSETS_DIR, { recursive: true, force: true });
-            fs.mkdirSync(ASSETS_DIR, { recursive: true });
-            console.log('[ROS] Disconnected: cleared ros2_data/');
-        } else if (rosUp && !urdfExists) {
+// cb(err, nodeNames) — nodeNames は "/ns/name" 形式のフルネーム
+function listRosNodes(cb) {
+    if (_graphNode) {
+        try {
+            const names = _graphNode.getNodeNamesAndNamespaces()
+                .map(({ name, namespace }) => `${namespace === '/' ? '' : namespace}/${name}`);
+            return cb(null, names);
+        } catch (e) {
+            return cb(e);
+        }
+    }
+    exec('ros2 node list', { timeout: 10000 }, (err, stdout) => {
+        cb(err, err ? [] : stdout.split('\n').map((l) => l.trim()).filter(Boolean));
+    });
+}
+
+const RSP_DOWN_THRESHOLD = 3; // 正常な一覧で連続この回数見えなければ停止とみなす
+let _syncInProgress = false;
+let _checkInProgress = false;
+let _rspMissCount = 0;
+let _rspSeenDown = false;
+setInterval(() => {
+    if (_syncInProgress || _checkInProgress) return;
+    _checkInProgress = true;
+    listRosNodes((err, nodes) => {
+        _checkInProgress = false;
+        if (err) return;
+
+        if (!nodes.some((n) => n.endsWith('/robot_state_publisher'))) {
+            if (++_rspMissCount >= RSP_DOWN_THRESHOLD && !_rspSeenDown) {
+                _rspSeenDown = true;
+                console.log('[ROS] robot_state_publisher not found (keeping last robot)');
+            }
+            return;
+        }
+        _rspMissCount = 0;
+
+        const urdfExists = fs.existsSync(path.join(ASSETS_DIR, 'robot.urdf'));
+        if (!urdfExists || _rspSeenDown) {
             _syncInProgress = true;
             extractAssets({ retry: false })
-                .then(() => console.log('[ROS] Reconnected: assets re-synced'))
+                .then(() => {
+                    _rspSeenDown = false;
+                    console.log('[ROS] Reconnected: assets re-synced');
+                })
                 .catch(() => console.log('[ROS] Reconnect sync failed'))
                 .finally(() => { _syncInProgress = false; });
         }

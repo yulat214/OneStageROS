@@ -3,6 +3,8 @@ import * as ROSLIB from 'roslib';
 
 export function useROS(jointTopic: string) {
   const [rosStatus, setRosStatus] = useState<string>('Disconnected');
+  // rosbridge 切断時にインクリメントして useEffect を張り直す（roslib は自動再接続しないため）
+  const [reconnectKey, setReconnectKey] = useState(0);
 
   // 描画ループ内で参照・更新するためのRef
   const jointPositionsRef = useRef<Map<string, number>>(new Map());
@@ -21,6 +23,8 @@ export function useROS(jointTopic: string) {
     const hostname = window.location.hostname;
     const ros = new ROSLIB.Ros({ url: `ws://${hostname}:9090` });
     rosRef.current = ros;
+    let disposed = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
     ros.on('connection', () => {
       setRosStatus('Connected');
@@ -85,6 +89,11 @@ export function useROS(jointTopic: string) {
       setRosStatus('Disconnected');
       scanTopicRef.current = null;
       odomPubTopicRef.current = null;
+      // 切断中に最後の速度指令で走り続けないよう停止させる
+      cmdVelRef.current = { linearX: 0, angularZ: 0 };
+      if (!disposed && !reconnectTimer) {
+        reconnectTimer = setTimeout(() => setReconnectKey((k) => k + 1), 2000);
+      }
     });
 
     // rosbridge(Python) は全メッセージを JSON 化して送るため、高頻度トピックを
@@ -184,6 +193,8 @@ export function useROS(jointTopic: string) {
     });
 
     return () => {
+      disposed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       jointListener.unsubscribe();
       cmdVelListener.unsubscribe();
       odomListener.unsubscribe();
@@ -194,7 +205,7 @@ export function useROS(jointTopic: string) {
       odomPoseRef.current = null;
       ros.close();
     };
-  }, [jointTopic]);
+  }, [jointTopic, reconnectKey]);
 
   // stampMs省略時はDate.now()を使うが、可能な限り同一フレームでpublishTFに
   // 渡した値と揃えること。scanのタイムスタンプがTFより後になると、AMCL側の

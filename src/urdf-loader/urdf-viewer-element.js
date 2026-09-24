@@ -105,8 +105,8 @@ class URDFViewer extends HTMLElement {
         // Light setup
         const dirLight = new THREE.DirectionalLight(0xffffff, Math.PI);
         dirLight.position.set(4, 10, 1);
-        dirLight.shadow.mapSize.width = 2048;
-        dirLight.shadow.mapSize.height = 2048;
+        dirLight.shadow.mapSize.width = 1024;
+        dirLight.shadow.mapSize.height = 1024;
         dirLight.shadow.normalBias = 0.001;
         dirLight.castShadow = true;
         scene.add(dirLight);
@@ -117,7 +117,8 @@ class URDFViewer extends HTMLElement {
         renderer.setClearColor(0xffffff);
         renderer.setClearAlpha(0);
         renderer.shadowMap.enabled = true;
-        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        // PCFSoftShadowMap は重いため簡易な PCFShadowMap を使う
+        renderer.shadowMap.type = THREE.PCFShadowMap;
         renderer.outputColorSpace = THREE.SRGBColorSpace;
 
         // Camera setup
