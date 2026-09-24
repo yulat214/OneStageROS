@@ -150,19 +150,9 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   const { obstacles, addWorldModel, addBuiltMesh, removeObjectById, updateObjectPose, clearObstacles, exportEnvironment, loadEnvironment } = useWorldManager(scene);
   const { simulateLidar } = useLidarSim();
 
-  // rosbridge 自体が落ちたとき（稀）にビューアを消す
-  const prevRosStatusRef = useRef<string>('Disconnected');
-  useEffect(() => {
-    prevRosStatusRef.current = rosStatus;
-    if (rosStatus === 'Disconnected' || rosStatus === 'Error') {
-      const viewer = viewerRef.current as any;
-      // customElements.define 前に呼ぶと own property が prototype setter を shadow するため必ずガード
-      if (viewer && customElements.get('urdf-viewer')) viewer.urdf = '';
-    }
-  }, [rosStatus]);
-
-  // ROS ノードの生死をサーバー経由で3秒ごとに監視
-  const rosConnectedRef = useRef<boolean | null>(null);
+  // サーバー側で robot.urdf が（再）同期されたら 3 秒ごとの監視でビューアを再ロードする。
+  // 切断時にロボットを消すことはしない（一時的な切断・タイムアウトで消えて移動が止まるため）
+  const urdfVersionRef = useRef<number | null>(null);
   useEffect(() => {
     const hostname = window.location.hostname;
     const ASSET_SERVER_URL = `http://${hostname}:8000/`;
@@ -173,19 +163,12 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
         if (!customElements.get('urdf-viewer')) return;
 
         const res = await fetch(`${ASSET_SERVER_URL}api/ros/status`);
-        const { connected } = await res.json() as { connected: boolean };
+        const { connected, version } = await res.json() as { connected: boolean; version: number | null };
         const viewer = viewerRef.current as any;
-        if (!viewer) return;
+        if (!viewer || !connected || version === urdfVersionRef.current) return;
 
-        const prev = rosConnectedRef.current;
-        rosConnectedRef.current = connected;
-
-        if (!connected && prev !== false) {
-          viewer.urdf = '';
-        } else if (connected && prev !== true) {
-          // 初回(null)・再接続(false) どちらもロードする
-          viewer.urdf = `${ASSET_SERVER_URL}robot.urdf?t=${Date.now()}`;
-        }
+        urdfVersionRef.current = version;
+        viewer.urdf = `${ASSET_SERVER_URL}robot.urdf?t=${Date.now()}`;
       } catch {}
     };
 
@@ -200,13 +183,11 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     const ASSET_SERVER_URL = `http://${hostname}:8000/`;
     fetch(`${ASSET_SERVER_URL}api/ros/status`)
       .then(r => r.json())
-      .then(({ connected }: { connected: boolean }) => {
+      .then(({ connected, version }: { connected: boolean; version: number | null }) => {
         const viewer = viewerRef.current as any;
-        if (!viewer) return;
-        rosConnectedRef.current = connected;
-        if (connected) {
-          viewer.urdf = `${ASSET_SERVER_URL}robot.urdf?t=${Date.now()}`;
-        }
+        if (!viewer || !connected) return;
+        urdfVersionRef.current = version;
+        viewer.urdf = `${ASSET_SERVER_URL}robot.urdf?t=${Date.now()}`;
       })
       .catch(() => {});
   }, [isLoaded]);
