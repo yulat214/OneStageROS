@@ -119,7 +119,9 @@ function ServerFileBrowser({
                   📁 <span className="font-medium">.. (上の階層へ)</span>
                 </li>
               )}
-              {items.map((item, idx) => (
+              {items
+                .filter(item => item.isDirectory || acceptExtensions.includes(item.name.split('.').pop()?.toLowerCase() || ''))
+                .map((item, idx) => (
                 <li 
                   key={idx}
                   className="px-3 py-2 hover:bg-blue-50 dark:hover:bg-blue-900 cursor-pointer rounded flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200"
