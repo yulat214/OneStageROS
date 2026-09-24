@@ -87,11 +87,18 @@ export function useROS(jointTopic: string) {
       odomPubTopicRef.current = null;
     });
 
-    // ジョイント状態の購読
+    // rosbridge(Python) は全メッセージを JSON 化して送るため、高頻度トピックを
+    // そのまま購読すると rosbridge が詰まり WebSocket 切断の原因になる。
+    // 連続して流れる状態系トピックだけ間引く（最新値が次の周期で必ず届くもの）。
+    // /cmd_vel・/initialpose は最後の1通（停止指令等）を落とすと困るので間引かない。
+
+    // ジョイント状態の購読（joint_state_broadcaster は 100Hz → 描画周期の 30Hz に間引く）
     const jointListener = new ROSLIB.Topic({
       ros: ros,
       name: jointTopic,
-      messageType: 'sensor_msgs/msg/JointState'
+      messageType: 'sensor_msgs/msg/JointState',
+      throttle_rate: 33,
+      queue_length: 1,
     });
 
     jointListener.subscribe((message: any) => {
@@ -115,11 +122,13 @@ export function useROS(jointTopic: string) {
       };
     });
 
-    // Nav2 オドメトリの購読
+    // Nav2 オドメトリの購読（diff_drive_controller は 50Hz → 10Hz に間引く）
     const odomListener = new ROSLIB.Topic({
       ros,
       name: '/odom',
       messageType: 'nav_msgs/msg/Odometry',
+      throttle_rate: 100,
+      queue_length: 1,
     });
 
     odomListener.subscribe((message: any) => {

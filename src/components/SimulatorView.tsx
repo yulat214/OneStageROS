@@ -1084,13 +1084,18 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     const INTERVAL = 1000 / FPS;
     let animationFrameId: number;
     let lastTime = performance.now();
-    let scanCounter = 0; 
+    let scanCounter = 0;
 
-    const animate = (time: number) => {
-        animationFrameId = requestAnimationFrame(animate);
-
+    // シミュレーション（移動・TF・scan・把持判定）は描画と切り離し、一定周期で回す。
+    // requestAnimationFrame はタブが裏に回ると停止し、描画が重いと周期も落ちるため、
+    // TF/scan が途切れて AMCL・controller_server の TF ルックアップが失敗していた。
+    // Worker 内のタイマーはバックグラウンドタブでも間引かれないので、それを tick 源にする。
+    const step = () => {
+        const time = performance.now();
         const delta = time - lastTime;
-        if (delta < INTERVAL) return;
+        // タイマーの揺らぎで INTERVAL よりわずかに早く来た tick を捨てると
+        // 実効周期が半分になるため、明らかな重複 tick だけを弾く
+        if (delta < INTERVAL * 0.5) return;
 
         // フレーム遅延が大きいときに位置が飛ばないよう 100ms でキャップ
         const dt = Math.min(delta / 1000, 0.1);
@@ -1221,18 +1226,45 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
               const scanData = simulateLidar(urdfElement.robot, meshList);
               publishScan(scanData, frameStampMs);
             }
-
-            // 選択ハイライトを追従させる
-            selectBoxHelperRef.current?.update();
-
-            if (urdfElement.renderer && urdfElement.scene && urdfElement.camera) {
-                urdfElement.renderer.render(urdfElement.scene, urdfElement.camera);
-            }
         }
     };
 
-    animate(performance.now());
-    return () => cancelAnimationFrame(animationFrameId);
+    // 描画だけは requestAnimationFrame で行う（タブ非表示中は止まってよい）
+    const render = () => {
+        animationFrameId = requestAnimationFrame(render);
+        const urdfElement = viewerRef.current as any;
+        if (!urdfElement?.robot) return;
+
+        // 選択ハイライトを追従させる
+        selectBoxHelperRef.current?.update();
+
+        if (urdfElement.renderer && urdfElement.scene && urdfElement.camera) {
+            urdfElement.renderer.render(urdfElement.scene, urdfElement.camera);
+        }
+    };
+
+    let ticker: Worker | null = null;
+    let tickerUrl: string | null = null;
+    let fallbackId: ReturnType<typeof setInterval> | null = null;
+    try {
+        tickerUrl = URL.createObjectURL(new Blob(
+            [`setInterval(() => postMessage(0), ${INTERVAL});`],
+            { type: 'text/javascript' },
+        ));
+        ticker = new Worker(tickerUrl);
+        ticker.onmessage = step;
+    } catch {
+        // Worker が使えない環境では通常のタイマーで代用（前面タブなら同等に動く）
+        fallbackId = setInterval(step, INTERVAL);
+    }
+
+    render();
+    return () => {
+        cancelAnimationFrame(animationFrameId);
+        ticker?.terminate();
+        if (tickerUrl) URL.revokeObjectURL(tickerUrl);
+        if (fallbackId !== null) clearInterval(fallbackId);
+    };
   }, [scene, obstacles, cmdVelRef, jointPositionsRef, needsUpdateRef, simulateLidar, publishScan, publishTF, releaseHeldObject]); 
 
   return (
