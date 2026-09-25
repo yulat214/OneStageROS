@@ -1,8 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as ROSLIB from 'roslib';
 
+type RosStamp = { sec: number; nanosec: number };
+
+// 'server': サーバー（assets-server.js の sim-core）が移動計算と /tf・/onestage/odom を担当し、
+//           ブラウザは /onestage/sim_pose を描画するだけ
+// 'local' : サーバー側が使えない（rclnodejs 不可など）ので従来どおりブラウザが publish する
+// 'unknown': 判定前。二重 publish を避けるため、この間はどちらの publish もしない
+export type SimMode = 'unknown' | 'server' | 'local';
+
 export function useROS(jointTopic: string) {
   const [rosStatus, setRosStatus] = useState<string>('Disconnected');
+  const [simMode, setSimMode] = useState<SimMode>('unknown');
+  const simModeRef = useRef<SimMode>('unknown');
+  // サーバー側シミュレーションのロボット位置（ワールド座標）と、その TF と同じスタンプ
+  const simPoseRef = useRef<{ x: number; y: number; yaw: number; stamp: RosStamp } | null>(null);
   // rosbridge 切断時にインクリメントして useEffect を張り直す（roslib は自動再接続しないため）
   const [reconnectKey, setReconnectKey] = useState(0);
 
@@ -50,29 +62,6 @@ export function useROS(jointTopic: string) {
         messageType: 'nav_msgs/msg/Odometry',
       });
 
-      // base_link → base_scan の静的 TF を1回 publish
-      // latch: true 必須 — 指定しないと rosbridge 側の publisher lifespan が1秒に制限され、
-      // 接続から1秒以上経ってから起動した slam_toolbox / RViz がこの static transform を受信できない
-      const tfStaticTopic = new ROSLIB.Topic({
-        ros,
-        name: '/tf_static',
-        messageType: 'tf2_msgs/msg/TFMessage',
-        latch: true,
-      });
-      const now = Date.now();
-      tfStaticTopic.publish(({
-        transforms: [{
-          header: {
-            stamp: { sec: Math.floor(now / 1000), nanosec: (now % 1000) * 1_000_000 },
-            frame_id: 'base_link',
-          },
-          child_frame_id: 'base_scan',
-          transform: {
-            translation: { x: 0, y: 0, z: 0.15 },
-            rotation: { x: 0, y: 0, z: 0, w: 1 },
-          },
-        }],
-      }));
     });
     ros.on('error', (event: any) => {
       console.error(`[ROS] error at ${new Date().toISOString()}`, event);
@@ -117,20 +106,6 @@ export function useROS(jointTopic: string) {
       needsUpdateRef.current = true;
     });
 
-    // 速度指令の購読
-    const cmdVelListener = new ROSLIB.Topic({
-      ros: ros,
-      name: '/cmd_vel',
-      messageType: 'geometry_msgs/msg/Twist'
-    });
-
-    cmdVelListener.subscribe((message: any) => {
-      cmdVelRef.current = {
-        linearX: message.linear.x,
-        angularZ: message.angular.z
-      };
-    });
-
     // Nav2 オドメトリの購読（diff_drive_controller は 50Hz → 10Hz に間引く）
     const odomListener = new ROSLIB.Topic({
       ros,
@@ -149,6 +124,107 @@ export function useROS(jointTopic: string) {
         1 - 2 * (ori.y * ori.y + ori.z * ori.z),
       );
       odomPoseRef.current = { x: pos.x, y: pos.y, yaw, time: Date.now() };
+    });
+
+    return () => {
+      disposed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      jointListener.unsubscribe();
+      odomListener.unsubscribe();
+      scanTopicRef.current = null;
+      tfTopicRef.current = null;
+      odomPubTopicRef.current = null;
+      odomPoseRef.current = null;
+      ros.close();
+    };
+  }, [jointTopic, reconnectKey]);
+
+  // サーバー側シミュレーションの有無を判定する（assets-server が起動するまで再試行）
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const check = async () => {
+      try {
+        const res = await fetch(`http://${window.location.hostname}:8000/api/sim/status`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const { enabled } = await res.json() as { enabled: boolean };
+        if (cancelled) return;
+        const mode: SimMode = enabled ? 'server' : 'local';
+        simModeRef.current = mode;
+        setSimMode(mode);
+        console.log(`[SIM] mode: ${mode}`);
+      } catch {
+        if (!cancelled) timer = setTimeout(check, 3000);
+      }
+    };
+    check();
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  }, []);
+
+  // モードごとの購読・publish（接続し直すたびに張り直す）
+  useEffect(() => {
+    const ros = rosRef.current;
+    if (!ros || rosStatus !== 'Connected' || simMode === 'unknown') return;
+
+    if (simMode === 'server') {
+      const simPoseListener = new ROSLIB.Topic({
+        ros,
+        name: '/onestage/sim_pose',
+        messageType: 'geometry_msgs/msg/PoseStamped',
+        throttle_rate: 33,
+        queue_length: 1,
+      });
+      simPoseListener.subscribe((message: any) => {
+        const p = message.pose.position;
+        const o = message.pose.orientation;
+        simPoseRef.current = {
+          x: p.x,
+          y: p.y,
+          yaw: Math.atan2(2 * (o.w * o.z + o.x * o.y), 1 - 2 * (o.y * o.y + o.z * o.z)),
+          stamp: message.header.stamp,
+        };
+      });
+      return () => { simPoseListener.unsubscribe(); };
+    }
+
+    // --- 以下 local モード（従来のブラウザ publish） ---
+
+    // base_link → base_scan の静的 TF を1回 publish
+    // latch: true 必須 — 指定しないと rosbridge 側の publisher lifespan が1秒に制限され、
+    // 接続から1秒以上経ってから起動した slam_toolbox / RViz がこの static transform を受信できない
+    const tfStaticTopic = new ROSLIB.Topic({
+      ros,
+      name: '/tf_static',
+      messageType: 'tf2_msgs/msg/TFMessage',
+      latch: true,
+    });
+    const now = Date.now();
+    tfStaticTopic.publish(({
+      transforms: [{
+        header: {
+          stamp: { sec: Math.floor(now / 1000), nanosec: (now % 1000) * 1_000_000 },
+          frame_id: 'base_link',
+        },
+        child_frame_id: 'base_scan',
+        transform: {
+          translation: { x: 0, y: 0, z: 0.15 },
+          rotation: { x: 0, y: 0, z: 0, w: 1 },
+        },
+      }],
+    }));
+
+    // 速度指令の購読
+    const cmdVelListener = new ROSLIB.Topic({
+      ros,
+      name: '/cmd_vel',
+      messageType: 'geometry_msgs/msg/Twist'
+    });
+
+    cmdVelListener.subscribe((message: any) => {
+      cmdVelRef.current = {
+        linearX: message.linear.x,
+        angularZ: message.angular.z
+      };
     });
 
     // 2D Pose Estimate を受信したら odom を即座に (0,0,0) にリセット
@@ -193,30 +269,29 @@ export function useROS(jointTopic: string) {
     });
 
     return () => {
-      disposed = true;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      jointListener.unsubscribe();
       cmdVelListener.unsubscribe();
-      odomListener.unsubscribe();
       initialPoseListener.unsubscribe();
-      scanTopicRef.current = null;
-      tfTopicRef.current = null;
-      odomPubTopicRef.current = null;
-      odomPoseRef.current = null;
-      ros.close();
     };
-  }, [jointTopic, reconnectKey]);
+  }, [rosStatus, simMode]);
 
   // stampMs省略時はDate.now()を使うが、可能な限り同一フレームでpublishTFに
   // 渡した値と揃えること。scanのタイムスタンプがTFより後になると、AMCL側の
   // tf2が「未来への外挿」としてルックアップを拒否し
   // "Couldn't determine robot's pose associated with laser scan" の原因になる。
-  const publishScan = (scanData: any, stampMs?: number) => {
+  // server モードでは sim_pose のスタンプ（＝その位置の TF と同じ時刻）をそのまま渡す。
+  // scan が遅れて届いても、その時刻の TF は tf2 のバッファに残っているので位置が正しく対応する
+  const publishScan = (scanData: any, stamp?: number | RosStamp) => {
     if (!scanTopicRef.current) return;
-    const now = stampMs ?? Date.now();
+    let rosStamp: RosStamp;
+    if (typeof stamp === 'object') {
+      rosStamp = stamp;
+    } else {
+      const now = stamp ?? Date.now();
+      rosStamp = { sec: Math.floor(now / 1000), nanosec: (now % 1000) * 1_000_000 };
+    }
     scanTopicRef.current.publish({
       header: {
-        stamp: { sec: Math.floor(now / 1000), nanosec: (now % 1000) * 1_000_000 },
+        stamp: rosStamp,
         frame_id: 'base_scan',
       },
       ...scanData,
@@ -226,7 +301,7 @@ export function useROS(jointTopic: string) {
   // odom → base_link の動的 TF を publish
   // Nav2 ON 時は Nav2 スタック自身が odom → base_link TF を出すため呼ばない
   const publishTF = useCallback((x: number, y: number, yaw: number, stampMs?: number) => {
-    if (!tfTopicRef.current) return;
+    if (!tfTopicRef.current || simModeRef.current !== 'local') return;
     try {
       const now = stampMs ?? Date.now();
       const sec = Math.floor(now / 1000);
@@ -275,5 +350,5 @@ export function useROS(jointTopic: string) {
     } catch {}
   }, []);
 
-  return { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, publishTF, odomPoseRef, initialPoseRef };
+  return { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, publishTF, odomPoseRef, initialPoseRef, simMode, simModeRef, simPoseRef };
 }

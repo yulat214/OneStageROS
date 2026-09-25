@@ -348,16 +348,27 @@ app.get('/api/ros/status', (req, res) => {
 // （以前はタイムアウト＝切断とみなして ros2_data/ を消しており、ロボットが頻繁に消えていた）。
 // ノード一覧は常駐の rclnodejs ノードから取る（毎回 CLI を起動するより大幅に軽い）。
 // rclnodejs が使えない環境（メッセージ未生成など）では `ros2 node list` にフォールバックする
+// 同じ rclnodejs コンテキストでサーバー側シミュレーション（/tf・/onestage/odom の定期 publish）も動かす。
+// 使えない場合 /api/sim/status が enabled:false を返し、ブラウザが従来どおり自前で publish する
 let _graphNode = null;
+const simCore = require('./sim-core');
+simCore.registerRoutes(app);
 (async () => {
+    let rclnodejs;
     try {
-        const rclnodejs = require('rclnodejs');
+        rclnodejs = require('rclnodejs');
         await rclnodejs.init();
         _graphNode = rclnodejs.createNode('onestage_graph_monitor');
         rclnodejs.spin(_graphNode);
         console.log('[ROS] graph monitor: rclnodejs');
     } catch (e) {
         console.warn(`[ROS] rclnodejs unavailable, falling back to "ros2 node list": ${e.message}`);
+        return;
+    }
+    try {
+        await simCore.start(rclnodejs);
+    } catch (e) {
+        console.warn(`[SIM] server-side simulation unavailable, browser will publish TF: ${e.message}`);
     }
 })();
 
