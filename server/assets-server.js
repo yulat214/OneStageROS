@@ -738,6 +738,16 @@ startNode('ros2', [
     'rosbridge_websocket_launch.xml'
 ], 'Rosbridge');
 
+// 1b. カメラ画像専用の rosbridge（9091）。画像の処理で 9090 の rosbridge が詰まり、
+//     /onestage/sim_pose・/joint_states などの配信が止まらないよう分ける。
+//     launch ファイルは rosapi も起動するので、実行ファイルを直接ノード名を変えて起動する
+startNode('ros2', [
+    'run',
+    'rosbridge_server',
+    'rosbridge_websocket',
+    '--ros-args', '-r', '__node:=rosbridge_websocket_camera', '-p', 'port:=9091',
+], 'RosbridgeCamera');
+
 // 2. rosapi_node の起動
 startNode('ros2', [
     'run', 
