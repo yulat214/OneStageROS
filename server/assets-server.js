@@ -748,12 +748,7 @@ startNode('ros2', [
     '--ros-args', '-r', '__node:=rosbridge_websocket_camera', '-p', 'port:=9091',
 ], 'RosbridgeCamera');
 
-// 2. rosapi_node の起動
-startNode('ros2', [
-    'run', 
-    'rosapi', 
-    'rosapi_node'
-], 'RosAPI');
+// rosapi は 1 の launch ファイルが起動する（ここで別に起動すると同名の /rosapi が 2 つになる）
 
 // ===================================================
 

@@ -20,7 +20,9 @@ const DEPTH_MAX_RANGE = 5.0;      // RangeFinder maxRange [m]（超えた画素�
 // 水平画角と縦横比から three.js の PerspectiveCamera.fov（垂直画角・度）を求める
 const vfovDeg = (hfovRad: number, aspect: number) =>
   2 * Math.atan(Math.tan(hfovRad / 2) / aspect) * 180 / Math.PI;
-const PUBLISH_EVERY_N_FRAMES = 6;
+// 画像の送信間隔。描画フレーム数で数えるとディスプレイのリフレッシュレートで頻度が変わる
+// （144Hz なら 24Hz）ため時間で決める。100ms = 60Hz 表示で従来の「6 フレームに 1 回」と同じ
+const PUBLISH_INTERVAL_MS = 100;
 // カメラ画像（1 枚あたりカラー+深度で約 3MB の JSON）は専用の rosbridge に送る。
 // 9090 の rosbridge（Python・1 スレッド）で処理させると、処理しきれない PC では画像の処理待ちが溜まり、
 // 同じ rosbridge から届く /onestage/sim_pose・/joint_states が止まって画面描画が固まる。
@@ -433,7 +435,7 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
       // --- アニメーションループ ---
       const pos = new THREE.Vector3();
       const quat = new THREE.Quaternion();
-      let pubCount = 0;
+      let lastPublishMs = -Infinity;
       let scanCount = 0;
       // カラーと深度は同じフレームで撮る（従来どおりの対応関係を保つ）ため、
       // どちらかが読み出し〜エンコード中なら両方とも次の撮影を見送る
@@ -477,12 +479,14 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
 
         renderer.render(scene, camera);
 
-        const shouldPublish = ++pubCount % PUBLISH_EVERY_N_FRAMES === 0;
+        const nowMs = performance.now();
+        const shouldPublish = nowMs - lastPublishMs >= PUBLISH_INTERVAL_MS;
         const w = renderer.domElement.width, h = renderer.domElement.height;
         if (!shouldPublish || w <= 0 || h <= 0 || colorBusy || depthBusy) return;
         // 前の画像をまだ送り終えていなければこのフレームは見送る。rosbridge の処理が追いつかない PC で
         // 処理待ちが溜まり続けるのを防ぐ（追いつかない分だけ実効の送信頻度が自動で下がる）
         if ((cameraSocketRef.current?.bufferedAmount ?? 0) > 0) return;
+        lastPublishMs = nowMs;
 
         // タイムスタンプ・frame_id・内部パラメータは撮影（描画）した時点の値を使う
         const now = Date.now();
