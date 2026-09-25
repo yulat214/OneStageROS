@@ -3,7 +3,7 @@ import { X, ChevronDown } from 'lucide-react';
 import type * as THREE from 'three';
 import { useROS } from '../hooks/useROS';
 import { useWorldManager, toLayoutEntry } from '../hooks/useWorldManager';
-import { useLidarSim } from '../hooks/useLidarSim';
+import { useLidarSim, sliceObstaclesInFrame, LIDAR_HEIGHT } from '../hooks/useLidarSim';
 import { detectGripperProfile, type GripperProfile } from '../hooks/gripperProfiles';
 
 declare global {
@@ -146,7 +146,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   const [isEditorOpen, setIsEditorOpen] = useState(false); // ワールド編集パネルの開閉
   const [isObjListOpen, setIsObjListOpen] = useState(false); // 編集パネル内「オブジェクト」の折りたたみ
 
-  const { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, publishTF, initialPoseRef } = useROS(jointTopic);
+  const { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, publishTF, initialPoseRef, simMode, simModeRef, simPoseRef } = useROS(jointTopic);
   const { obstacles, addWorldModel, addBuiltMesh, removeObjectById, updateObjectPose, clearObstacles, exportEnvironment, loadEnvironment } = useWorldManager(scene);
   const { simulateLidar } = useLidarSim();
 
@@ -268,9 +268,67 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     mat?.color.set(hex);
   };
 
+  // --- サーバー側シミュレーション（simMode === 'server'）との同期 ---
+  // ロボット位置の正はサーバー。ブラウザでの姿勢設定は HTTP で送り、描画は /onestage/sim_pose に従う
+  const postSim = useCallback((apiPath: string, body: object) => {
+    return fetch(`http://${window.location.hostname}:8000/api/sim/${apiPath}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).catch((e) => { console.warn(`[SIM] ${apiPath} failed`, e); });
+  }, []);
+
+  // モード判定前に設定された姿勢は、判定後に送る。
+  // ifUninitialized=true はページ読込時の復元用で、サーバーのロボットがすでに動いていれば上書きしない
+  // （再読込や 2 台目のブラウザで、動作中のロボットが localStorage の古い位置へ戻らないようにする）
+  const pendingServerPoseRef = useRef<{ pose: { x: number; y: number; yaw: number }; ifUninitialized: boolean } | null>(null);
+  const flushServerPose = useCallback(() => {
+    const pending = pendingServerPoseRef.current;
+    if (!pending || simModeRef.current !== 'server') return;
+    pendingServerPoseRef.current = null;
+    // 古い sim_pose で見た目が一瞬戻らないよう、次の受信まで currentPoseRef を使う
+    if (!pending.ifUninitialized) simPoseRef.current = null;
+    postSim('pose', { ...pending.pose, ifUninitialized: pending.ifUninitialized });
+  }, [postSim, simModeRef, simPoseRef]);
+  const pushPoseToServer = useCallback((pose: { x: number; y: number; yaw: number }, ifUninitialized: boolean) => {
+    pendingServerPoseRef.current = { pose: { ...pose }, ifUninitialized };
+    flushServerPose();
+  }, [flushServerPose]);
+
+  // 障害物の断面（LiDAR の高さで切った線分）をサーバーへ送る。サーバーはこれとロボット位置から /scan を作る。
+  // 変化したときに送り、サーバー再起動で失われても復旧するよう変化がなくても 2 秒ごとに送り直す。
+  // 送信中に新しい断面ができたら、完了後に最新のものだけを送る
+  const segSyncRef = useRef<{ last: number[] | null; lastSentAt: number; inFlight: boolean; pending: number[] | null }>(
+    { last: null, lastSentAt: 0, inFlight: false, pending: null },
+  );
+  const segBufRef = useRef<number[]>([]);
+  const sendObstacleSegs = useCallback((segs: number[]) => {
+    const st = segSyncRef.current;
+    const unchanged = st.last !== null && st.last.length === segs.length
+      && st.last.every((v, i) => Math.abs(v - segs[i]) < 1e-6);
+    if (unchanged && performance.now() - st.lastSentAt < 2000) return;
+    if (st.inFlight) { st.pending = segs.slice(); return; }
+    st.inFlight = true;
+    st.last = segs.slice();
+    st.lastSentAt = performance.now();
+    postSim('obstacles', { segments: st.last }).finally(() => {
+      st.inFlight = false;
+      const next = st.pending;
+      st.pending = null;
+      if (next) sendObstacleSegs(next);
+    });
+  }, [postSim]);
+
+  useEffect(() => {
+    if (simMode !== 'server') return;
+    postSim('config', { paused: isPausedRef.current, hasMobileBase: hasMobileBaseRef.current });
+    flushServerPose();
+  }, [simMode, postSim, flushServerPose]);
+
   const togglePause = () => {
     isPausedRef.current = !isPausedRef.current;
     setIsPaused(isPausedRef.current);
+    if (simModeRef.current === 'server') postSim('config', { paused: isPausedRef.current });
   };
 
   // 把持中オブジェクトを解放する（グリッパーが開いた時に呼ぶ）
@@ -288,17 +346,19 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   }, [obstacles]);
 
   // ワールド／launch 由来のロボット初期姿勢を適用する（リセット時の戻り先も更新）
-  const applyRobotPose = useCallback((pose: { x: number; y: number; yaw: number } | null) => {
+  // force=false はページ読込時の復元（サーバーのロボットが動作中ならそちらを優先）
+  const applyRobotPose = useCallback((pose: { x: number; y: number; yaw: number } | null, force = false) => {
     const home = pose ?? { x: 0, y: 0, yaw: 0 };
     initialRobotPoseRef.current = { ...home };
     currentPoseRef.current = { ...home };
     odomOriginRef.current = { ...home };
+    pushPoseToServer(home, !force);
     const urdfElement = viewerRef.current as any;
     if (urdfElement?.robot) {
       urdfElement.robot.position.set(home.x, home.y, 0);
       urdfElement.robot.rotation.z = home.yaw;
     }
-  }, []);
+  }, [pushPoseToServer]);
 
   // ロボットの位置・速度・一時停止状態を初期姿勢に戻す（オブジェクトはそのまま）
   const resetRobot = () => {
@@ -308,6 +368,8 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     cmdVelRef.current = { linearX: 0, angularZ: 0 };
     isPausedRef.current = false;
     setIsPaused(false);
+    pushPoseToServer(home, false);
+    if (simModeRef.current === 'server') postSim('config', { paused: false });
     const urdfElement = viewerRef.current as any;
     if (urdfElement?.robot) {
       urdfElement.robot.position.set(home.x, home.y, 0);
@@ -739,6 +801,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     cmdVelRef.current = { linearX: 0, angularZ: 0 };
     isPausedRef.current = false;
     setIsPaused(false);
+    if (simModeRef.current === 'server') postSim('config', { paused: false });
     releaseHeldObject();
     clearSelection();
     clearObstacles();
@@ -747,7 +810,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
       const { objects, robot } = await loadWorldFromSdf(wp);
       isRestoringRef.current = false;
       const spawn = spawnOverrideRef.current ?? robot;
-      applyRobotPose(spawn);
+      applyRobotPose(spawn, true);
       localStorage.setItem(envStorageKeyRef.current, JSON.stringify({ objects, robot: spawn }));
       localStorage.setItem(poseStorageKeyRef.current, JSON.stringify(currentPoseRef.current));
     } catch (e) {
@@ -755,7 +818,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
       console.error(e);
       alert('ワールドの再読み込みに失敗しました。');
     }
-  }, [clearObstacles, clearSelection, releaseHeldObject, loadWorldFromSdf, applyRobotPose, cmdVelRef]);
+  }, [clearObstacles, clearSelection, releaseHeldObject, loadWorldFromSdf, applyRobotPose, cmdVelRef, postSim, simModeRef]);
 
   // 「リセット」ボタンの実処理。
   //  - ワールド起動モード: 部屋ごと初期状態に戻す（resetTrial）
@@ -887,6 +950,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
         // これがあるロボットは /cmd_vel を受け取っても移動させない。
         viewer.addEventListener('urdf-processed', () => {
           hasMobileBaseRef.current = !viewer.robot?.links?.world;
+          if (simModeRef.current === 'server') postSim('config', { hasMobileBase: hasMobileBaseRef.current });
 
           const profile = detectGripperProfile(viewer.robot);
           gripperProfileRef.current = profile;
@@ -1029,6 +1093,8 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
         const raw = localStorage.getItem(STORAGE_POSE_KEY);
         if (raw) currentPoseRef.current = JSON.parse(raw);
       } catch {}
+      // サーバー側シミュレーションは最初の姿勢設定まで TF を出さないので、ここで必ず送る
+      pushPoseToServer(currentPoseRef.current, true);
       try {
         const raw = localStorage.getItem(STORAGE_ENV_KEY);
         if (raw) {
@@ -1090,8 +1156,21 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
         // AMCL側のtf2が「未来への外挿」としてルックアップを拒否することがある。
         const frameStampMs = Date.now();
 
+        // local モードで scan に付けるスタンプ（null なら scan を出さない）
+        let scanStamp: number | null = frameStampMs;
+
         if (urdfElement?.robot) {
-            if (!isPausedRef.current) {
+            const mode = simModeRef.current;
+            if (mode === 'server') {
+                // 移動計算・TF・scan はサーバー側。受信した位置を描画に反映するだけ
+                const sp = simPoseRef.current;
+                if (sp) currentPoseRef.current = { x: sp.x, y: sp.y, yaw: sp.yaw };
+                urdfElement.robot.position.set(currentPoseRef.current.x, currentPoseRef.current.y, 0);
+                urdfElement.robot.rotation.z = currentPoseRef.current.yaw;
+            } else if (mode === 'unknown') {
+                // 判定前は publish しない（サーバーとブラウザの二重 publish を避ける）
+                scanStamp = null;
+            } else if (!isPausedRef.current) {
                 // 2D Pose Estimate 受信時: 見た目(currentPoseRef)は動かさず、
                 // odom TF算出用の基準点だけを現在の見た目位置に更新する
                 const ip = initialPoseRef.current;
@@ -1203,11 +1282,20 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
 
             if (scanCounter++ % 3 === 0) {
               // renderer.render() より前なので matrixWorld が古い。
-              // transformDirection が正しく動くよう事前に更新する。
+              // transformDirection が正しく動くよう事前に更新する（把持中の物体もロボットの子なので一緒に更新される）
               urdfElement.robot.updateMatrixWorld(true);
               const meshList = obstacles.map(obj => obj.mesh);
-              const scanData = simulateLidar(urdfElement.robot, meshList);
-              publishScan(scanData, frameStampMs);
+              if (mode === 'server') {
+                // scan はサーバーが作る。こちらは障害物の断面を渡すだけ（rosbridge を通さない）
+                const frame = urdfElement.robot.parent;
+                if (frame) {
+                  sliceObstaclesInFrame(meshList, frame, LIDAR_HEIGHT, segBufRef.current);
+                  sendObstacleSegs(segBufRef.current);
+                }
+              } else if (scanStamp !== null) {
+                const scanData = simulateLidar(urdfElement.robot, meshList);
+                publishScan(scanData, scanStamp);
+              }
             }
         }
     };
@@ -1248,7 +1336,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
         if (tickerUrl) URL.revokeObjectURL(tickerUrl);
         if (fallbackId !== null) clearInterval(fallbackId);
     };
-  }, [scene, obstacles, cmdVelRef, jointPositionsRef, needsUpdateRef, simulateLidar, publishScan, publishTF, releaseHeldObject]); 
+  }, [scene, obstacles, cmdVelRef, jointPositionsRef, needsUpdateRef, simulateLidar, publishScan, publishTF, releaseHeldObject, simModeRef, simPoseRef, sendObstacleSegs]); 
 
   return (
     <div className="h-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg overflow-hidden flex flex-col shadow-sm relative">

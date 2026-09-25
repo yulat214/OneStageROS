@@ -27,7 +27,11 @@ app.use((err, req, res, next) => {
     next(err);
 });
 
-const apiLimiter = rateLimit({ windowMs: 60_000, max: 200, standardHeaders: true, legacyHeaders: false });
+// /api/sim/ はシミュレーション状態の同期（把持中の物体が動く間は障害物の断面を 10Hz で送る）なので対象外
+const apiLimiter = rateLimit({
+    windowMs: 60_000, max: 200, standardHeaders: true, legacyHeaders: false,
+    skip: (req) => req.path.startsWith('/sim/'),
+});
 app.use('/api/', apiLimiter);
 
 console.log('---------------------------------------------------');
@@ -348,16 +352,27 @@ app.get('/api/ros/status', (req, res) => {
 // （以前はタイムアウト＝切断とみなして ros2_data/ を消しており、ロボットが頻繁に消えていた）。
 // ノード一覧は常駐の rclnodejs ノードから取る（毎回 CLI を起動するより大幅に軽い）。
 // rclnodejs が使えない環境（メッセージ未生成など）では `ros2 node list` にフォールバックする
+// 同じ rclnodejs コンテキストでサーバー側シミュレーション（/tf・/onestage/odom の定期 publish）も動かす。
+// 使えない場合 /api/sim/status が enabled:false を返し、ブラウザが従来どおり自前で publish する
 let _graphNode = null;
+const simCore = require('./sim-core');
+simCore.registerRoutes(app);
 (async () => {
+    let rclnodejs;
     try {
-        const rclnodejs = require('rclnodejs');
+        rclnodejs = require('rclnodejs');
         await rclnodejs.init();
         _graphNode = rclnodejs.createNode('onestage_graph_monitor');
         rclnodejs.spin(_graphNode);
         console.log('[ROS] graph monitor: rclnodejs');
     } catch (e) {
         console.warn(`[ROS] rclnodejs unavailable, falling back to "ros2 node list": ${e.message}`);
+        return;
+    }
+    try {
+        await simCore.start(rclnodejs);
+    } catch (e) {
+        console.warn(`[SIM] server-side simulation unavailable, browser will publish TF: ${e.message}`);
     }
 })();
 
@@ -723,12 +738,17 @@ startNode('ros2', [
     'rosbridge_websocket_launch.xml'
 ], 'Rosbridge');
 
-// 2. rosapi_node の起動
+// 1b. カメラ画像専用の rosbridge（9091）。画像の処理で 9090 の rosbridge が詰まり、
+//     /onestage/sim_pose・/joint_states などの配信が止まらないよう分ける。
+//     launch ファイルは rosapi も起動するので、実行ファイルを直接ノード名を変えて起動する
 startNode('ros2', [
-    'run', 
-    'rosapi', 
-    'rosapi_node'
-], 'RosAPI');
+    'run',
+    'rosbridge_server',
+    'rosbridge_websocket',
+    '--ros-args', '-r', '__node:=rosbridge_websocket_camera', '-p', 'port:=9091',
+], 'RosbridgeCamera');
+
+// rosapi は 1 の launch ファイルが起動する（ここで別に起動すると同名の /rosapi が 2 つになる）
 
 // ===================================================
 

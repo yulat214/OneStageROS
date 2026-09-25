@@ -20,7 +20,15 @@ const DEPTH_MAX_RANGE = 5.0;      // RangeFinder maxRange [m]（超えた画素�
 // 水平画角と縦横比から three.js の PerspectiveCamera.fov（垂直画角・度）を求める
 const vfovDeg = (hfovRad: number, aspect: number) =>
   2 * Math.atan(Math.tan(hfovRad / 2) / aspect) * 180 / Math.PI;
-const PUBLISH_EVERY_N_FRAMES = 6;
+// 画像の送信間隔。描画フレーム数で数えるとディスプレイのリフレッシュレートで頻度が変わる
+// （144Hz なら 24Hz）ため時間で決める。100ms = 60Hz 表示で従来の「6 フレームに 1 回」と同じ
+const PUBLISH_INTERVAL_MS = 100;
+// カメラ画像（1 枚あたりカラー+深度で約 3MB の JSON）は専用の rosbridge に送る。
+// 9090 の rosbridge（Python・1 スレッド）で処理させると、処理しきれない PC では画像の処理待ちが溜まり、
+// 同じ rosbridge から届く /onestage/sim_pose・/joint_states が止まって画面描画が固まる。
+// 専用ポートにつながらない（docker のポート公開がない等）ときは 9090 にフォールバックする
+const CAMERA_BRIDGE_PORT = 9091;
+const MAIN_BRIDGE_PORT = 9090;
 const STORAGE_KEY = 'robotCameraFreeView';
 
 type CameraMode = 'robot' | 'free';
@@ -197,6 +205,8 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
   const applyResizeRef = useRef<(() => void) | null>(null);
   const opticalLinkRef = useRef<string>('');
   const imageTopicRef = useRef<ROSLIB.Topic<unknown> | null>(null);
+  // カメラ用 rosbridge の WebSocket（送信待ちの量を見るため）
+  const cameraSocketRef = useRef<WebSocket | null>(null);
   const depthTopicRef = useRef<ROSLIB.Topic<unknown> | null>(null);
   const cameraInfoTopicRef = useRef<ROSLIB.Topic<unknown> | null>(null);
   // 各トピックに ROS 側の購読者がいるか（rosapi で定期確認。確認前・失敗時は true = 従来どおり publish）
@@ -254,31 +264,68 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
 
   useEffect(() => {
     const hostname = window.location.hostname;
-    const ros = new ROSLIB.Ros({ url: `ws://${hostname}:9090` });
     // 画像の publish は readPixels（GPU 同期）＋ピクセル変換＋base64 化でメインスレッドを
     // 1回 100ms 以上止め、シミュレータの TF/scan 送信を途切れさせる。
     // 購読者がいないときは生成自体を省く。購読者数が取れない場合は従来どおり publish する。
+    let disposed = false;
+    let ros: ROSLIB.Ros | null = null;
     let pollId: ReturnType<typeof setInterval> | null = null;
-    const subscribersSrv = new ROSLIB.Service({ ros, name: '/rosapi/subscribers', serviceType: 'rosapi_msgs/srv/Subscribers' });
-    const pollSubscribers = () => {
-      const check = (topic: string, ref: typeof colorWantedRef) =>
-        subscribersSrv.callService({ topic }, (res: any) => { ref.current = (res?.subscribers?.length ?? 1) > 0; }, () => { ref.current = true; });
-      check('/camera/camera/color/image_raw', colorWantedRef);
-      check('/camera/camera/color/camera_info', colorInfoWantedRef);
-      check('/camera/camera/depth/image_rect_raw', depthWantedRef);
-    };
     const stopPolling = () => { if (pollId !== null) { clearInterval(pollId); pollId = null; } };
-    ros.on('connection', () => {
-      imageTopicRef.current = new ROSLIB.Topic({ ros, name: '/camera/camera/color/image_raw', messageType: 'sensor_msgs/msg/Image' });
-      depthTopicRef.current = new ROSLIB.Topic({ ros, name: '/camera/camera/depth/image_rect_raw', messageType: 'sensor_msgs/msg/Image' });
-      cameraInfoTopicRef.current = new ROSLIB.Topic({ ros, name: '/camera/camera/color/camera_info', messageType: 'sensor_msgs/msg/CameraInfo' });
-      stopPolling();
-      pollSubscribers();
-      pollId = setInterval(pollSubscribers, 2000);
-    });
-    ros.on('close', () => { stopPolling(); imageTopicRef.current = null; depthTopicRef.current = null; cameraInfoTopicRef.current = null; });
-    ros.on('error', () => { stopPolling(); imageTopicRef.current = null; depthTopicRef.current = null; cameraInfoTopicRef.current = null; });
-    return () => { stopPolling(); imageTopicRef.current = null; depthTopicRef.current = null; cameraInfoTopicRef.current = null; ros.close(); };
+    const clearTopics = () => {
+      imageTopicRef.current = null;
+      depthTopicRef.current = null;
+      cameraInfoTopicRef.current = null;
+      cameraSocketRef.current = null;
+    };
+
+    const connect = (port: number) => {
+      let connected = false;
+      let handledDown = false;
+      const r = new ROSLIB.Ros({
+        url: `ws://${hostname}:${port}`,
+        // 送信待ちの量（bufferedAmount）を見て送り過ぎを防ぐため、WebSocket 本体を取っておく
+        transportFactory: async (url: string) => {
+          const transport = await ROSLIB.WebSocketTransportFactory(url);
+          cameraSocketRef.current = (transport as any).socket ?? null;
+          return transport;
+        },
+      });
+      ros = r;
+      const subscribersSrv = new ROSLIB.Service({ ros: r, name: '/rosapi/subscribers', serviceType: 'rosapi_msgs/srv/Subscribers' });
+      const pollSubscribers = () => {
+        const check = (topic: string, ref: typeof colorWantedRef) =>
+          subscribersSrv.callService({ topic }, (res: any) => { ref.current = (res?.subscribers?.length ?? 1) > 0; }, () => { ref.current = true; });
+        check('/camera/camera/color/image_raw', colorWantedRef);
+        check('/camera/camera/color/camera_info', colorInfoWantedRef);
+        check('/camera/camera/depth/image_rect_raw', depthWantedRef);
+      };
+      r.on('connection', () => {
+        connected = true;
+        console.log(`[RobotCamera] publishing via rosbridge :${port}`);
+        imageTopicRef.current = new ROSLIB.Topic({ ros: r, name: '/camera/camera/color/image_raw', messageType: 'sensor_msgs/msg/Image' });
+        depthTopicRef.current = new ROSLIB.Topic({ ros: r, name: '/camera/camera/depth/image_rect_raw', messageType: 'sensor_msgs/msg/Image' });
+        cameraInfoTopicRef.current = new ROSLIB.Topic({ ros: r, name: '/camera/camera/color/camera_info', messageType: 'sensor_msgs/msg/CameraInfo' });
+        stopPolling();
+        pollSubscribers();
+        pollId = setInterval(pollSubscribers, 2000);
+      });
+      const onDown = () => {
+        stopPolling();
+        clearTopics();
+        if (handledDown) return; // error と close の両方が来る
+        handledDown = true;
+        if (!connected && port === CAMERA_BRIDGE_PORT && !disposed) {
+          console.warn(`[RobotCamera] rosbridge :${CAMERA_BRIDGE_PORT} に接続できないため :${MAIN_BRIDGE_PORT} を使います`);
+          r.close();
+          connect(MAIN_BRIDGE_PORT);
+        }
+      };
+      r.on('close', onDown);
+      r.on('error', onDown);
+    };
+
+    connect(CAMERA_BRIDGE_PORT);
+    return () => { disposed = true; stopPolling(); clearTopics(); ros?.close(); };
   }, []);
 
   useEffect(() => {
@@ -388,7 +435,7 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
       // --- アニメーションループ ---
       const pos = new THREE.Vector3();
       const quat = new THREE.Quaternion();
-      let pubCount = 0;
+      let lastPublishMs = -Infinity;
       let scanCount = 0;
       // カラーと深度は同じフレームで撮る（従来どおりの対応関係を保つ）ため、
       // どちらかが読み出し〜エンコード中なら両方とも次の撮影を見送る
@@ -432,9 +479,14 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
 
         renderer.render(scene, camera);
 
-        const shouldPublish = ++pubCount % PUBLISH_EVERY_N_FRAMES === 0;
+        const nowMs = performance.now();
+        const shouldPublish = nowMs - lastPublishMs >= PUBLISH_INTERVAL_MS;
         const w = renderer.domElement.width, h = renderer.domElement.height;
         if (!shouldPublish || w <= 0 || h <= 0 || colorBusy || depthBusy) return;
+        // 前の画像をまだ送り終えていなければこのフレームは見送る。rosbridge の処理が追いつかない PC で
+        // 処理待ちが溜まり続けるのを防ぐ（追いつかない分だけ実効の送信頻度が自動で下がる）
+        if ((cameraSocketRef.current?.bufferedAmount ?? 0) > 0) return;
+        lastPublishMs = nowMs;
 
         // タイムスタンプ・frame_id・内部パラメータは撮影（描画）した時点の値を使う
         const now = Date.now();
