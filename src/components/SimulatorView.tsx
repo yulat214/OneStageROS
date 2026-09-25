@@ -3,7 +3,7 @@ import { X, ChevronDown } from 'lucide-react';
 import type * as THREE from 'three';
 import { useROS } from '../hooks/useROS';
 import { useWorldManager, toLayoutEntry } from '../hooks/useWorldManager';
-import { useLidarSim } from '../hooks/useLidarSim';
+import { useLidarSim, sliceObstaclesInFrame, LIDAR_HEIGHT } from '../hooks/useLidarSim';
 import { detectGripperProfile, type GripperProfile } from '../hooks/gripperProfiles';
 
 declare global {
@@ -294,6 +294,30 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     pendingServerPoseRef.current = { pose: { ...pose }, ifUninitialized };
     flushServerPose();
   }, [flushServerPose]);
+
+  // 障害物の断面（LiDAR の高さで切った線分）をサーバーへ送る。サーバーはこれとロボット位置から /scan を作る。
+  // 変化したときに送り、サーバー再起動で失われても復旧するよう変化がなくても 2 秒ごとに送り直す。
+  // 送信中に新しい断面ができたら、完了後に最新のものだけを送る
+  const segSyncRef = useRef<{ last: number[] | null; lastSentAt: number; inFlight: boolean; pending: number[] | null }>(
+    { last: null, lastSentAt: 0, inFlight: false, pending: null },
+  );
+  const segBufRef = useRef<number[]>([]);
+  const sendObstacleSegs = useCallback((segs: number[]) => {
+    const st = segSyncRef.current;
+    const unchanged = st.last !== null && st.last.length === segs.length
+      && st.last.every((v, i) => Math.abs(v - segs[i]) < 1e-6);
+    if (unchanged && performance.now() - st.lastSentAt < 2000) return;
+    if (st.inFlight) { st.pending = segs.slice(); return; }
+    st.inFlight = true;
+    st.last = segs.slice();
+    st.lastSentAt = performance.now();
+    postSim('obstacles', { segments: st.last }).finally(() => {
+      st.inFlight = false;
+      const next = st.pending;
+      st.pending = null;
+      if (next) sendObstacleSegs(next);
+    });
+  }, [postSim]);
 
   useEffect(() => {
     if (simMode !== 'server') return;
@@ -1132,16 +1156,15 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
         // AMCL側のtf2が「未来への外挿」としてルックアップを拒否することがある。
         const frameStampMs = Date.now();
 
-        // scan のスタンプ。server モードではその scan を撮った位置の sim_pose と同じ時刻
-        let scanStamp: number | { sec: number; nanosec: number } | null = frameStampMs;
+        // local モードで scan に付けるスタンプ（null なら scan を出さない）
+        let scanStamp: number | null = frameStampMs;
 
         if (urdfElement?.robot) {
             const mode = simModeRef.current;
             if (mode === 'server') {
-                // 移動計算と TF はサーバー側。受信した位置を描画に反映するだけ
+                // 移動計算・TF・scan はサーバー側。受信した位置を描画に反映するだけ
                 const sp = simPoseRef.current;
                 if (sp) currentPoseRef.current = { x: sp.x, y: sp.y, yaw: sp.yaw };
-                scanStamp = sp?.stamp ?? null;
                 urdfElement.robot.position.set(currentPoseRef.current.x, currentPoseRef.current.y, 0);
                 urdfElement.robot.rotation.z = currentPoseRef.current.yaw;
             } else if (mode === 'unknown') {
@@ -1257,13 +1280,22 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
                 }
             }
 
-            if (scanCounter++ % 3 === 0 && scanStamp !== null) {
+            if (scanCounter++ % 3 === 0) {
               // renderer.render() より前なので matrixWorld が古い。
-              // transformDirection が正しく動くよう事前に更新する。
+              // transformDirection が正しく動くよう事前に更新する（把持中の物体もロボットの子なので一緒に更新される）
               urdfElement.robot.updateMatrixWorld(true);
               const meshList = obstacles.map(obj => obj.mesh);
-              const scanData = simulateLidar(urdfElement.robot, meshList);
-              publishScan(scanData, scanStamp);
+              if (mode === 'server') {
+                // scan はサーバーが作る。こちらは障害物の断面を渡すだけ（rosbridge を通さない）
+                const frame = urdfElement.robot.parent;
+                if (frame) {
+                  sliceObstaclesInFrame(meshList, frame, LIDAR_HEIGHT, segBufRef.current);
+                  sendObstacleSegs(segBufRef.current);
+                }
+              } else if (scanStamp !== null) {
+                const scanData = simulateLidar(urdfElement.robot, meshList);
+                publishScan(scanData, scanStamp);
+              }
             }
         }
     };
@@ -1304,7 +1336,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
         if (tickerUrl) URL.revokeObjectURL(tickerUrl);
         if (fallbackId !== null) clearInterval(fallbackId);
     };
-  }, [scene, obstacles, cmdVelRef, jointPositionsRef, needsUpdateRef, simulateLidar, publishScan, publishTF, releaseHeldObject, simModeRef, simPoseRef]); 
+  }, [scene, obstacles, cmdVelRef, jointPositionsRef, needsUpdateRef, simulateLidar, publishScan, publishTF, releaseHeldObject, simModeRef, simPoseRef, sendObstacleSegs]); 
 
   return (
     <div className="h-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg overflow-hidden flex flex-col shadow-sm relative">

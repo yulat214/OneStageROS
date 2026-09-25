@@ -8,6 +8,9 @@ import * as THREE from 'three';
 // 判定するより数倍速く（sim_house で約 3.3ms → 約 0.9ms）、結果は一致する。
 // 物体が動いてもよいよう、断面は毎回作り直す（作り直しは 0.2ms 未満）。
 
+// base_link から見た LiDAR（base_scan）の高さ
+export const LIDAR_HEIGHT = 0.15;
+
 const _a = new THREE.Vector3();
 const _b = new THREE.Vector3();
 const _c = new THREE.Vector3();
@@ -74,6 +77,18 @@ function sliceObstacles(obstacles: THREE.Object3D[], origin: THREE.Vector3, segs
   }
 }
 
+// server モード用: frame（ロボットの親 = シミュレータのワールド座標系、Z-up）の
+// 高さ height の水平面で障害物を切った線分を作る。座標は frame の x, y そのままなので、
+// サーバーはロボット位置 (x, y, yaw) から同じ線分に対してレイを飛ばせる
+export function sliceObstaclesInFrame(obstacles: THREE.Object3D[], frame: THREE.Object3D, height: number, segs: number[]) {
+  const m = frame.matrixWorld;
+  const origin = new THREE.Vector3(0, 0, height).applyMatrix4(m);
+  _ux.set(1, 0, 0).transformDirection(m);
+  _uy.set(0, 1, 0).transformDirection(m);
+  _up.set(0, 0, 1).transformDirection(m);
+  sliceObstacles(obstacles, origin, segs);
+}
+
 // 原点から (dx, dy) 方向のレイが最初に当たる距離（[minRange, maxRange] の外なら Infinity）
 function castRay(segs: number[], dx: number, dy: number, minRange: number, maxRange: number) {
   let best = Infinity;
@@ -109,7 +124,7 @@ export function useLidarSim() {
     // ロボットの現在位置（Three.js world space は Y-up なので Y に高さを加算）
     const origin = new THREE.Vector3();
     robot.getWorldPosition(origin);
-    origin.y += 0.15;
+    origin.y += LIDAR_HEIGHT;
 
     // ロボット body frame (+X=前方, +Y=左, Z=上) の各軸を world space に変換（親の座標変換も含む）
     _ux.set(1, 0, 0).transformDirection(robot.matrixWorld);

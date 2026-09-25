@@ -27,7 +27,11 @@ app.use((err, req, res, next) => {
     next(err);
 });
 
-const apiLimiter = rateLimit({ windowMs: 60_000, max: 200, standardHeaders: true, legacyHeaders: false });
+// /api/sim/ はシミュレーション状態の同期（把持中の物体が動く間は障害物の断面を 10Hz で送る）なので対象外
+const apiLimiter = rateLimit({
+    windowMs: 60_000, max: 200, standardHeaders: true, legacyHeaders: false,
+    skip: (req) => req.path.startsWith('/sim/'),
+});
 app.use('/api/', apiLimiter);
 
 console.log('---------------------------------------------------');

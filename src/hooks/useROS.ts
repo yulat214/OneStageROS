@@ -278,8 +278,7 @@ export function useROS(jointTopic: string) {
   // 渡した値と揃えること。scanのタイムスタンプがTFより後になると、AMCL側の
   // tf2が「未来への外挿」としてルックアップを拒否し
   // "Couldn't determine robot's pose associated with laser scan" の原因になる。
-  // server モードでは sim_pose のスタンプ（＝その位置の TF と同じ時刻）をそのまま渡す。
-  // scan が遅れて届いても、その時刻の TF は tf2 のバッファに残っているので位置が正しく対応する
+  // local モード専用（server モードではサーバーが /scan を出す）。stamp は ms か ROS の stamp
   const publishScan = (scanData: any, stamp?: number | RosStamp) => {
     if (!scanTopicRef.current) return;
     let rosStamp: RosStamp;
