@@ -4,10 +4,9 @@ Thank you for your interest in contributing!
 
 ## Prerequisites
 
-- Ubuntu 22.04 or 24.04
-- ROS 2 Humble or later
+- Ubuntu 22.04
+- ROS 2 Humble
 - Node.js 20+
-- Docker (for demo environment)
 
 ## Getting Started
 
@@ -31,7 +30,7 @@ Thank you for your interest in contributing!
 
 ## Reporting Bugs
 
-Please open an issue at https://github.com/an/OneStageROS/issues and include:
+Please open an issue at https://github.com/yulat214/OneStageROS/issues and include:
 - OS and ROS 2 distribution
 - Steps to reproduce
 - Expected vs. actual behavior
