@@ -26,6 +26,7 @@ OneStageROS が ROS 2 とやり取りするトピック・ノードの一覧で�
 | `/cmd_vel` | `geometry_msgs/msg/Twist` | ロボットの走行 |
 | `/onestage/sim_pose` | `geometry_msgs/msg/PoseStamped` | 3D ビューへのロボットの位置の反映 |
 | `/initialpose` | `geometry_msgs/msg/PoseWithCovarianceStamped` | 自己位置の初期化（RViz の 2D Pose Estimate） |
+| `/tf` | `tf2_msgs/msg/TFMessage` | `map` → `odom`（リセット時の位置を `map` 座標に変換するため） |
 | `/rosout` | `rcl_interfaces/msg/Log` | デバッグログの表示 |
 | `/camera/color/camera_info` | `sensor_msgs/msg/CameraInfo` | カメラビューの縦横比 |
 
@@ -40,6 +41,7 @@ OneStageROS が ROS 2 とやり取りするトピック・ノードの一覧で�
 | `/tf_static` | `tf2_msgs/msg/TFMessage` | `base_link` → `base_scan` |
 | `/onestage/odom` | `nav_msgs/msg/Odometry` | オドメトリ（`odom` → `base_link`） |
 | `/onestage/sim_pose` | `geometry_msgs/msg/PoseStamped` | ロボットの位置（`onestage_world` フレーム） |
+| `/initialpose` | `geometry_msgs/msg/PoseWithCovarianceStamped` | リセット後のロボットの位置（`map` フレーム。`map` → `odom` を受信している場合のみ） |
 | `/camera/camera/color/image_raw` | `sensor_msgs/msg/Image` | カラー画像 |
 | `/camera/camera/depth/image_rect_raw` | `sensor_msgs/msg/Image` | 深度画像 |
 | `/camera/camera/color/camera_info` | `sensor_msgs/msg/CameraInfo` | カメラの内部パラメータ |
@@ -86,5 +88,7 @@ ros2 run cartographer_ros cartographer_node \
 2. RViz の **2D Pose Estimate** でロボットの初期位置を指定します。
    OneStageROS は `/initialpose` を受信すると、3D ビュー上のロボットの位置はそのままに、`odom` を指定位置に合わせて初期化します。
 3. RViz の **Nav2 Goal** で目的地を指定すると、Nav2 が配信する `/cmd_vel` に従ってロボットが移動します。
+
+シミュレータの **リセット** を押すと、リセット後の位置を `/initialpose` で Nav2 に通知します。Nav2 の自己位置を指定し直す必要はありません。
 
 Nav2 のオドメトリ入力にトピックを使う場合は、`odom` を `/onestage/odom` にリマップしてください。

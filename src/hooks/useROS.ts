@@ -30,6 +30,11 @@ export function useROS(jointTopic: string) {
   const odomPoseRef = useRef<{ x: number; y: number; yaw: number; time: number } | null>(null);
   // 2D Pose Estimate 受信時の初期位置（マップフレーム座標）。pending=true で未適用
   const initialPoseRef = useRef<{ pending: boolean } | null>(null);
+  // AMCL 等が /tf に流す map → odom の最新値（未受信なら null）
+  const mapToOdomRef = useRef<{ x: number; y: number; yaw: number } | null>(null);
+  const initialPosePubTopicRef = useRef<ROSLIB.Topic | null>(null);
+  // 自分が publish した /initialpose のスタンプ（server モードで自分の通知を無視するため）
+  const selfInitialPoseStampRef = useRef<RosStamp | null>(null);
 
   useEffect(() => {
     const hostname = window.location.hostname;
@@ -62,12 +67,19 @@ export function useROS(jointTopic: string) {
         messageType: 'nav_msgs/msg/Odometry',
       });
 
+      // リセット時に nav 側へ現在位置を通知するための publisher
+      initialPosePubTopicRef.current = new ROSLIB.Topic({
+        ros,
+        name: '/initialpose',
+        messageType: 'geometry_msgs/msg/PoseWithCovarianceStamped',
+      });
     });
     ros.on('error', (event: any) => {
       console.error(`[ROS] error at ${new Date().toISOString()}`, event);
       setRosStatus('Error');
       scanTopicRef.current = null;
       odomPubTopicRef.current = null;
+      initialPosePubTopicRef.current = null;
     });
     ros.on('close', (event: any) => {
       // event.code/reason/wasClean は生の WebSocket CloseEvent。
@@ -78,6 +90,7 @@ export function useROS(jointTopic: string) {
       setRosStatus('Disconnected');
       scanTopicRef.current = null;
       odomPubTopicRef.current = null;
+      initialPosePubTopicRef.current = null;
       // 切断中に最後の速度指令で走り続けないよう停止させる
       cmdVelRef.current = { linearX: 0, angularZ: 0 };
       if (!disposed && !reconnectTimer) {
@@ -126,15 +139,35 @@ export function useROS(jointTopic: string) {
       odomPoseRef.current = { x: pos.x, y: pos.y, yaw, time: Date.now() };
     });
 
+    // map → odom（AMCL が publish）を監視。リセット時に初期位置を map 座標へ変換するのに使う。
+    // /tf には odom → base_link 等も混ざるため、間引くと map → odom を取りこぼすので間引かない
+    const tfListener = new ROSLIB.Topic({
+      ros,
+      name: '/tf',
+      messageType: 'tf2_msgs/msg/TFMessage',
+    });
+    tfListener.subscribe((message: any) => {
+      for (const t of message.transforms ?? []) {
+        if (t.header?.frame_id?.replace(/^\//, '') !== 'map' || t.child_frame_id?.replace(/^\//, '') !== 'odom') continue;
+        const tr = t.transform.translation;
+        const q = t.transform.rotation;
+        const yaw = Math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+        mapToOdomRef.current = { x: tr.x, y: tr.y, yaw };
+      }
+    });
+
     return () => {
       disposed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       jointListener.unsubscribe();
       odomListener.unsubscribe();
+      tfListener.unsubscribe();
       scanTopicRef.current = null;
       tfTopicRef.current = null;
       odomPubTopicRef.current = null;
       odomPoseRef.current = null;
+      mapToOdomRef.current = null;
+      initialPosePubTopicRef.current = null;
       ros.close();
     };
   }, [jointTopic, reconnectKey]);
@@ -184,7 +217,25 @@ export function useROS(jointTopic: string) {
           stamp: message.header.stamp,
         };
       });
-      return () => { simPoseListener.unsubscribe(); };
+      // 2D Pose Estimate でサーバーが odom 原点を現在位置に移すのに合わせ、
+      // ブラウザ側の odom 原点（リセット時の /initialpose 計算に使う）も追従させる
+      const serverInitialPoseListener = new ROSLIB.Topic({
+        ros,
+        name: '/initialpose',
+        messageType: 'geometry_msgs/msg/PoseWithCovarianceStamped',
+      });
+      serverInitialPoseListener.subscribe((message: any) => {
+        // リセット時に自分が出したものは odom 原点をすでに設定済み。
+        // ここで現在位置に合わせると、届いた古い sim_pose の位置で上書きしてしまう
+        const st = message.header?.stamp;
+        const own = selfInitialPoseStampRef.current;
+        if (own && st?.sec === own.sec && st?.nanosec === own.nanosec) return;
+        initialPoseRef.current = { pending: true };
+      });
+      return () => {
+        simPoseListener.unsubscribe();
+        serverInitialPoseListener.unsubscribe();
+      };
     }
 
     // --- 以下 local モード（従来のブラウザ publish） ---
@@ -349,5 +400,42 @@ export function useROS(jointTopic: string) {
     } catch {}
   }, []);
 
-  return { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, publishTF, odomPoseRef, initialPoseRef, simMode, simModeRef, simPoseRef };
+  // odom 座標の姿勢を map 座標に変換して /initialpose に publish する（nav 側の自己位置を合わせる）。
+  // map → odom を未受信（AMCL 未起動など）なら何もせず false を返す。
+  const publishInitialPose = useCallback((odomX: number, odomY: number, odomYaw: number) => {
+    const m = mapToOdomRef.current;
+    const topic = initialPosePubTopicRef.current;
+    if (!m || !topic) return false;
+    const c = Math.cos(m.yaw);
+    const s = Math.sin(m.yaw);
+    const x = m.x + odomX * c - odomY * s;
+    const y = m.y + odomX * s + odomY * c;
+    const yaw = m.yaw + odomYaw;
+    const now = Date.now();
+    const stamp = { sec: Math.floor(now / 1000), nanosec: (now % 1000) * 1_000_000 };
+    selfInitialPoseStampRef.current = stamp;
+    // 共分散は RViz の 2D Pose Estimate と同じ値
+    const covariance = Array(36).fill(0);
+    covariance[0] = 0.25;
+    covariance[7] = 0.25;
+    covariance[35] = 0.06853891909122467;
+    try {
+      topic.publish({
+        header: {
+          stamp,
+          frame_id: 'map',
+        },
+        pose: {
+          pose: {
+            position: { x, y, z: 0 },
+            orientation: { x: 0, y: 0, z: Math.sin(yaw / 2), w: Math.cos(yaw / 2) },
+          },
+          covariance,
+        },
+      });
+    } catch { return false; }
+    return true;
+  }, []);
+
+  return { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, publishTF, odomPoseRef, initialPoseRef, simMode, simModeRef, simPoseRef, publishInitialPose };
 }
