@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Video } from 'lucide-react';
+import { Video, Radio } from 'lucide-react';
 import * as ROSLIB from 'roslib';
 import type * as THREE from 'three';
 
@@ -20,9 +20,12 @@ const DEPTH_MAX_RANGE = 5.0;      // RangeFinder maxRange [m]（超えた画素�
 // 水平画角と縦横比から three.js の PerspectiveCamera.fov（垂直画角・度）を求める
 const vfovDeg = (hfovRad: number, aspect: number) =>
   2 * Math.atan(Math.tan(hfovRad / 2) / aspect) * 180 / Math.PI;
-// 画像の送信間隔。描画フレーム数で数えるとディスプレイのリフレッシュレートで頻度が変わる
-// （144Hz なら 24Hz）ため時間で決める。100ms = 60Hz 表示で従来の「6 フレームに 1 回」と同じ
-const PUBLISH_INTERVAL_MS = 100;
+// 画像の配信周期の選択肢 [Hz]。描画フレーム数で数えるとディスプレイのリフレッシュレートで
+// 頻度が変わる（144Hz なら 24Hz）ため、時間で間隔を決める
+const PUBLISH_RATE_OPTIONS = [1, 2, 5, 10];
+const DEFAULT_PUBLISH_RATE_HZ = 5;
+const PUBLISH_ENABLED_STORAGE_KEY = 'robotCameraPublishEnabled';
+const PUBLISH_RATE_STORAGE_KEY = 'robotCameraPublishRateHz';
 // カメラ画像（1 枚あたりカラー+深度で約 3MB の JSON）は専用の rosbridge に送る。
 // 9090 の rosbridge（Python・1 スレッド）で処理させると、処理しきれない PC では画像の処理待ちが溜まり、
 // 同じ rosbridge から届く /onestage/sim_pose・/joint_states が止まって画面描画が固まる。
@@ -193,6 +196,29 @@ function saveOrbit(orbit: { theta: number; phi: number; radius: number }, target
   }));
 }
 
+function loadPublishEnabled(): boolean {
+  try {
+    return localStorage.getItem(PUBLISH_ENABLED_STORAGE_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function loadPublishRateHz(): number {
+  try {
+    const hz = Number(localStorage.getItem(PUBLISH_RATE_STORAGE_KEY));
+    if (PUBLISH_RATE_OPTIONS.includes(hz)) return hz;
+  } catch {}
+  return DEFAULT_PUBLISH_RATE_HZ;
+}
+
+function savePublishSettings(enabled: boolean, rateHz: number) {
+  try {
+    localStorage.setItem(PUBLISH_ENABLED_STORAGE_KEY, String(enabled));
+    localStorage.setItem(PUBLISH_RATE_STORAGE_KEY, String(rateHz));
+  } catch {}
+}
+
 interface RobotCameraViewProps {
   scene: THREE.Scene | null;
 }
@@ -209,10 +235,11 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
   const cameraSocketRef = useRef<WebSocket | null>(null);
   const depthTopicRef = useRef<ROSLIB.Topic<unknown> | null>(null);
   const cameraInfoTopicRef = useRef<ROSLIB.Topic<unknown> | null>(null);
-  // 各トピックに ROS 側の購読者がいるか（rosapi で定期確認。確認前・失敗時は true = 従来どおり publish）
-  const colorWantedRef = useRef(true);
-  const colorInfoWantedRef = useRef(true);
-  const depthWantedRef = useRef(true);
+  // 配信の ON/OFF と周期（アニメーションループから参照するため ref にも持つ）
+  const [publishEnabled, setPublishEnabled] = useState(loadPublishEnabled);
+  const [publishRateHz, setPublishRateHz] = useState(loadPublishRateHz);
+  const publishEnabledRef = useRef(publishEnabled);
+  const publishIntervalMsRef = useRef(1000 / publishRateHz);
   const depthMaterialRef = useRef<THREE.MeshDepthMaterial | null>(null);
   const depthTargetRef = useRef<THREE.WebGLRenderTarget | null>(null);
   const modeRef = useRef<CameraMode>('robot');
@@ -262,15 +289,23 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
     return () => { topic.unsubscribe(); ros.close(); };
   }, []);
 
+  // 配信の ON/OFF・周期を反映する。ON の間はトピックを advertise しておき、
+  // 購読者がいなくても `ros2 topic list` や RViz の一覧に表示されるようにする
+  useEffect(() => {
+    publishEnabledRef.current = publishEnabled;
+    publishIntervalMsRef.current = 1000 / publishRateHz;
+    savePublishSettings(publishEnabled, publishRateHz);
+    for (const topic of [imageTopicRef.current, depthTopicRef.current, cameraInfoTopicRef.current]) {
+      if (!topic) continue;
+      if (publishEnabled) topic.advertise();
+      else topic.unadvertise();
+    }
+  }, [publishEnabled, publishRateHz]);
+
   useEffect(() => {
     const hostname = window.location.hostname;
-    // 画像の publish は readPixels（GPU 同期）＋ピクセル変換＋base64 化でメインスレッドを
-    // 1回 100ms 以上止め、シミュレータの TF/scan 送信を途切れさせる。
-    // 購読者がいないときは生成自体を省く。購読者数が取れない場合は従来どおり publish する。
     let disposed = false;
     let ros: ROSLIB.Ros | null = null;
-    let pollId: ReturnType<typeof setInterval> | null = null;
-    const stopPolling = () => { if (pollId !== null) { clearInterval(pollId); pollId = null; } };
     const clearTopics = () => {
       imageTopicRef.current = null;
       depthTopicRef.current = null;
@@ -291,26 +326,19 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
         },
       });
       ros = r;
-      const subscribersSrv = new ROSLIB.Service({ ros: r, name: '/rosapi/subscribers', serviceType: 'rosapi_msgs/srv/Subscribers' });
-      const pollSubscribers = () => {
-        const check = (topic: string, ref: typeof colorWantedRef) =>
-          subscribersSrv.callService({ topic }, (res: any) => { ref.current = (res?.subscribers?.length ?? 1) > 0; }, () => { ref.current = true; });
-        check('/camera/camera/color/image_raw', colorWantedRef);
-        check('/camera/camera/color/camera_info', colorInfoWantedRef);
-        check('/camera/camera/depth/image_rect_raw', depthWantedRef);
-      };
       r.on('connection', () => {
         connected = true;
         console.log(`[RobotCamera] publishing via rosbridge :${port}`);
         imageTopicRef.current = new ROSLIB.Topic({ ros: r, name: '/camera/camera/color/image_raw', messageType: 'sensor_msgs/msg/Image' });
         depthTopicRef.current = new ROSLIB.Topic({ ros: r, name: '/camera/camera/depth/image_rect_raw', messageType: 'sensor_msgs/msg/Image' });
         cameraInfoTopicRef.current = new ROSLIB.Topic({ ros: r, name: '/camera/camera/color/camera_info', messageType: 'sensor_msgs/msg/CameraInfo' });
-        stopPolling();
-        pollSubscribers();
-        pollId = setInterval(pollSubscribers, 2000);
+        if (publishEnabledRef.current) {
+          imageTopicRef.current.advertise();
+          depthTopicRef.current.advertise();
+          cameraInfoTopicRef.current.advertise();
+        }
       });
       const onDown = () => {
-        stopPolling();
         clearTopics();
         if (handledDown) return; // error と close の両方が来る
         handledDown = true;
@@ -325,7 +353,7 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
     };
 
     connect(CAMERA_BRIDGE_PORT);
-    return () => { disposed = true; stopPolling(); clearTopics(); ros?.close(); };
+    return () => { disposed = true; clearTopics(); ros?.close(); };
   }, []);
 
   useEffect(() => {
@@ -479,8 +507,10 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
 
         renderer.render(scene, camera);
 
+        // 配信 OFF の間は、画像の読み出し・エンコードも行わない
+        if (!publishEnabledRef.current) return;
         const nowMs = performance.now();
-        const shouldPublish = nowMs - lastPublishMs >= PUBLISH_INTERVAL_MS;
+        const shouldPublish = nowMs - lastPublishMs >= publishIntervalMsRef.current;
         const w = renderer.domElement.width, h = renderer.domElement.height;
         if (!shouldPublish || w <= 0 || h <= 0 || colorBusy || depthBusy) return;
         // 前の画像をまだ送り終えていなければこのフレームは見送る。rosbridge の処理が追いつかない PC で
@@ -495,7 +525,7 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
         const gl = renderer.getContext() as WebGL2RenderingContext;
 
         // --- カラー画像 + camera_info ---
-        if (imageTopicRef.current && (colorWantedRef.current || colorInfoWantedRef.current)) {
+        if (imageTopicRef.current) {
           const vFovRad = camera.fov * Math.PI / 180;
           const fy = h / (2 * Math.tan(vFovRad / 2));
           const fx = fy;
@@ -511,29 +541,25 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
             p: [fx, 0, cx, 0, 0, fy, cy, 0, 0, 0, 1, 0],
           });
 
-          if (colorWantedRef.current) {
-            colorBusy = true;
-            // renderer.render() 直後なので既定フレームバッファには今描いた画像が入っている
-            readDefaultFramebufferAsync(gl, w, h)
-              .then(rgba => encoder.encode({ kind: 'color', rgba, w, h }))
-              .then(data => {
-                if (!isMounted) return;
-                imageTopicRef.current?.publish({
-                  header: { stamp, frame_id: frameId },
-                  height: h, width: w, encoding: 'rgb8', is_bigendian: 0, step: w * 3, data,
-                });
-                publishInfo();
-              })
-              .catch(err => { if (isMounted) console.warn('[RobotCamera] color publish failed', err); })
-              .finally(() => { colorBusy = false; });
-          } else {
-            // camera_info だけ購読されている場合は画像の読み出し自体を省く
-            publishInfo();
-          }
+          colorBusy = true;
+          // renderer.render() 直後なので既定フレームバッファには今描いた画像が入っている
+          readDefaultFramebufferAsync(gl, w, h)
+            .then(rgba => encoder.encode({ kind: 'color', rgba, w, h }))
+            .then(data => {
+              // エンコード中に配信 OFF にされた場合は送らない（publish すると再び advertise される）
+              if (!isMounted || !publishEnabledRef.current) return;
+              imageTopicRef.current?.publish({
+                header: { stamp, frame_id: frameId },
+                height: h, width: w, encoding: 'rgb8', is_bigendian: 0, step: w * 3, data,
+              });
+              publishInfo();
+            })
+            .catch(err => { if (isMounted) console.warn('[RobotCamera] color publish failed', err); })
+            .finally(() => { colorBusy = false; });
         }
 
         // --- 深度画像 ---
-        if (depthTopicRef.current && depthMaterialRef.current && depthWantedRef.current) {
+        if (depthTopicRef.current && depthMaterialRef.current) {
           if (!depthTargetRef.current || depthTargetRef.current.width !== w || depthTargetRef.current.height !== h) {
             depthTargetRef.current?.dispose();
             depthTargetRef.current = new THREE.WebGLRenderTarget(w, h);
@@ -555,7 +581,7 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
           renderer.readRenderTargetPixelsAsync(target, 0, 0, w, h, new Uint8Array(w * h * 4))
             .then(rgba => encoder.encode({ kind: 'depth', rgba: rgba as Uint8Array, w, h, near, far, maxRange: DEPTH_MAX_RANGE }))
             .then(data => {
-              if (!isMounted) return;
+              if (!isMounted || !publishEnabledRef.current) return;
               depthTopicRef.current?.publish({
                 header: { stamp, frame_id: frameId },
                 height: h, width: w, encoding: '32FC1', is_bigendian: 0, step: w * 4, data,
@@ -594,36 +620,66 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
 
   return (
     <div className="h-full w-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg overflow-hidden flex flex-col shadow-sm">
-      <div className="bg-gray-100 dark:bg-gray-700 px-3 py-1.5 border-b border-gray-300 dark:border-gray-600 flex items-center gap-2 flex-shrink-0 flex-wrap">
-        <Video className="w-4 h-4 text-green-600 dark:text-green-400 flex-shrink-0" />
-        <h2 className="text-base text-gray-700 dark:text-gray-300">カメラビュー</h2>
-        <select
-          value={mode}
-          onChange={e => handleModeChange(e.target.value as CameraMode)}
-          className="ml-1 text-sm bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-500 rounded px-1 py-0.5 text-gray-700 dark:text-gray-300"
-        >
-          <option value="robot">ロボットカメラ</option>
-          <option value="free">フリービュー</option>
-        </select>
-        {mode === 'free' && (
-          <>
-            <span className="text-sm text-gray-400 dark:text-gray-500">ドラッグ:回転 Shift:移動 ホイール:ズーム</span>
+      <div className="bg-gray-100 dark:bg-gray-700 px-3 py-1.5 border-b border-gray-300 dark:border-gray-600 flex flex-col gap-1 flex-shrink-0">
+        <div className="flex items-center gap-2">
+          <Video className="w-4 h-4 text-green-600 dark:text-green-400 flex-shrink-0" />
+          <h2 className="text-base text-gray-700 dark:text-gray-300">
+            カメラビュー
+            {statusLive
+              ? <span className="text-sm ml-2 text-green-500">● {statusText}</span>
+              : <span className="text-sm ml-2 text-gray-400 dark:text-gray-500">● {statusText}</span>}
+          </h2>
+          <div className="ml-auto flex items-center gap-1">
+            <button
+              onClick={() => setPublishEnabled(v => !v)}
+              title={publishEnabled ? 'クリックで配信を停止' : 'クリックで配信を開始（カラー・深度・camera_info）'}
+              className={`flex items-center gap-1 px-3 py-1 rounded shadow-sm text-sm font-medium transition-colors ${
+                publishEnabled
+                  ? 'bg-green-500 hover:bg-green-600 text-white border border-green-600'
+                  : 'bg-white dark:bg-gray-600 hover:bg-gray-50 dark:hover:bg-gray-500 text-gray-600 dark:text-gray-200 border border-gray-300 dark:border-gray-500'
+              }`}
+            >
+              <Radio className="w-4 h-4" />
+              {publishEnabled ? '配信中' : '配信停止中'}
+            </button>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 mt-1 flex-wrap">
+          <span className="text-sm text-gray-500 dark:text-gray-400 flex-shrink-0">表示:</span>
+          <select
+            value={mode}
+            onChange={e => handleModeChange(e.target.value as CameraMode)}
+            className="text-sm px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200"
+          >
+            <option value="robot">ロボットカメラ</option>
+            <option value="free">フリービュー</option>
+          </select>
+          <span className="text-sm text-gray-500 dark:text-gray-400 flex-shrink-0 ml-2">周期:</span>
+          <select
+            value={publishRateHz}
+            onChange={e => setPublishRateHz(Number(e.target.value))}
+            title="カメラ画像の配信周期"
+            className="text-sm px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200"
+          >
+            {PUBLISH_RATE_OPTIONS.map(hz => <option key={hz} value={hz}>{hz} Hz</option>)}
+          </select>
+          {mode === 'free' && (
             <button
               onClick={handleSave}
-              className={`ml-auto text-sm px-2 py-0.5 rounded border transition-colors ${
+              className={`ml-auto text-sm px-2 py-1 rounded flex-shrink-0 transition-colors ${
                 saved
-                  ? 'bg-green-100 dark:bg-green-900 border-green-400 text-green-700 dark:text-green-300'
-                  : 'bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-500 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-600'
+                  ? 'bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300'
+                  : 'bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600'
               }`}
             >
               {saved ? '保存済み' : '視点を保存'}
             </button>
-          </>
+          )}
+        </div>
+        {mode === 'free' && (
+          <div className="text-xs text-gray-400 dark:text-gray-500">ドラッグ: 回転　Shift + ドラッグ: 移動　ホイール: ズーム</div>
         )}
-        <span className={`${mode === 'free' ? '' : 'ml-auto'} text-sm flex items-center gap-1 ${statusLive ? 'text-green-600 dark:text-green-400' : 'text-gray-400 dark:text-gray-500'}`}>
-          <span className={`w-2 h-2 rounded-full ${statusLive ? 'bg-green-500 animate-pulse' : 'bg-gray-400 dark:bg-gray-500'}`} />
-          {statusText}
-        </span>
       </div>
       <div className="flex-1 p-4 min-h-0 bg-gray-50 dark:bg-gray-900 overflow-hidden">
         <div ref={wrapperRef} className="w-full h-full border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg flex items-center justify-center overflow-hidden">

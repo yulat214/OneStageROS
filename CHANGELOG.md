@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-10-08
+
+### Fixed
+- Camera topics were published only while a subscriber existed, so they could not be selected in RViz. They are now published regardless of subscribers while publishing is turned on
+
+### Changed
+- Camera publishing is turned on and off with the button in the camera view header (off by default). When on, the color image, depth image and camera info are all published
+- The camera publish rate can be selected from 1 / 2 / 5 / 10 Hz (5 Hz by default, previously about 10 Hz)
+
 ## [1.1.1] - 2026-10-08
 
 ### Changed

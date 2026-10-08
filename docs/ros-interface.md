@@ -46,6 +46,8 @@ OneStageROS が ROS 2 とやり取りするトピック・ノードの一覧で�
 | `/camera/camera/depth/image_rect_raw` | `sensor_msgs/msg/Image` | 深度画像 |
 | `/camera/camera/color/camera_info` | `sensor_msgs/msg/CameraInfo` | カメラの内部パラメータ |
 
+カメラのトピックは、カメラビューで配信を「配信中」にしている間だけ配信されます（[カメラビュー](camera.md#配信のオンオフ)）。
+
 各トピックの詳細は [シミュレータ](simulator.md#仮想センサー) と [カメラビュー](camera.md#配信するトピック) を参照してください。
 
 ---
