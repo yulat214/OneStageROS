@@ -146,7 +146,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   const [isEditorOpen, setIsEditorOpen] = useState(false); // ワールド編集パネルの開閉
   const [isObjListOpen, setIsObjListOpen] = useState(false); // 編集パネル内「オブジェクト」の折りたたみ
 
-  const { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, publishTF, initialPoseRef, simMode, simModeRef, simPoseRef } = useROS(jointTopic);
+  const { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, publishTF, initialPoseRef, simMode, simModeRef, simPoseRef, publishInitialPose } = useROS(jointTopic);
   const { obstacles, addWorldModel, addBuiltMesh, removeObjectById, updateObjectPose, clearObstacles, exportEnvironment, loadEnvironment } = useWorldManager(scene);
   const { simulateLidar } = useLidarSim();
 
@@ -345,6 +345,17 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     heldObjectIdRef.current = null;
   }, [obstacles]);
 
+  // リセット先の見た目姿勢 home を、リセット前の odom 基準（odomOriginRef）で odom 座標に直し、
+  // map → odom を掛けて /initialpose として nav 側に通知する。odomOriginRef を書き換える前に呼ぶこと。
+  const notifyNavOfPose = useCallback((home: { x: number; y: number; yaw: number }) => {
+    const origin = odomOriginRef.current;
+    const dx = home.x - origin.x;
+    const dy = home.y - origin.y;
+    const cosO = Math.cos(origin.yaw);
+    const sinO = Math.sin(origin.yaw);
+    publishInitialPose(dx * cosO + dy * sinO, -dx * sinO + dy * cosO, home.yaw - origin.yaw);
+  }, [publishInitialPose]);
+
   // ワールド／launch 由来のロボット初期姿勢を適用する（リセット時の戻り先も更新）
   // force=false はページ読込時の復元（サーバーのロボットが動作中ならそちらを優先）
   const applyRobotPose = useCallback((pose: { x: number; y: number; yaw: number } | null, force = false) => {
@@ -360,9 +371,10 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     }
   }, [pushPoseToServer]);
 
-  // ロボットの位置・速度・一時停止状態を初期姿勢に戻す（オブジェクトはそのまま）
+  // ロボットの位置・速度・一時停止状態を初期姿勢に戻す（オブジェクトの扱いは呼び出し側）
   const resetRobot = () => {
     const home = initialRobotPoseRef.current;
+    notifyNavOfPose(home);
     currentPoseRef.current = { ...home };
     odomOriginRef.current = { ...home };
     cmdVelRef.current = { linearX: 0, angularZ: 0 };
@@ -810,6 +822,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
       const { objects, robot } = await loadWorldFromSdf(wp);
       isRestoringRef.current = false;
       const spawn = spawnOverrideRef.current ?? robot;
+      notifyNavOfPose(spawn ?? { x: 0, y: 0, yaw: 0 });
       applyRobotPose(spawn, true);
       localStorage.setItem(envStorageKeyRef.current, JSON.stringify({ objects, robot: spawn }));
       localStorage.setItem(poseStorageKeyRef.current, JSON.stringify(currentPoseRef.current));
@@ -818,13 +831,19 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
       console.error(e);
       alert('ワールドの再読み込みに失敗しました。');
     }
-  }, [clearObstacles, clearSelection, releaseHeldObject, loadWorldFromSdf, applyRobotPose, cmdVelRef, postSim, simModeRef]);
+  }, [clearObstacles, clearSelection, releaseHeldObject, loadWorldFromSdf, applyRobotPose, notifyNavOfPose, cmdVelRef, postSim, simModeRef]);
 
   // 「リセット」ボタンの実処理。
   //  - ワールド起動モード: 部屋ごと初期状態に戻す（resetTrial）
-  //  - それ以外: ロボット姿勢のみリセット（オブジェクトは手動配置なので触らない）
+  //  - それ以外: ロボット姿勢をリセットし、配置済みオブジェクトもすべて消去する
   const handleReset = () => {
     if (worldPathRef.current) { resetTrial(); return; }
+    if (obstacles.length > 0) {
+      if (!window.confirm('ロボットの位置をリセットし、配置したオブジェクトをすべて消去します。よろしいですか？')) return;
+      releaseHeldObject();
+      clearSelection();
+      clearObstacles();
+    }
     resetRobot();
   };
 
@@ -1165,6 +1184,12 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
                 // 移動計算・TF・scan はサーバー側。受信した位置を描画に反映するだけ
                 const sp = simPoseRef.current;
                 if (sp) currentPoseRef.current = { x: sp.x, y: sp.y, yaw: sp.yaw };
+                // 2D Pose Estimate 受信時: サーバー同様 odom 原点を現在位置に合わせる（リセット時の /initialpose 計算用）
+                const ip = initialPoseRef.current;
+                if (ip?.pending) {
+                    odomOriginRef.current = { ...currentPoseRef.current };
+                    ip.pending = false;
+                }
                 urdfElement.robot.position.set(currentPoseRef.current.x, currentPoseRef.current.y, 0);
                 urdfElement.robot.rotation.z = currentPoseRef.current.yaw;
             } else if (mode === 'unknown') {
@@ -1359,7 +1384,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
             onClick={handleReset}
             title={worldMode
               ? 'ロボットとオブジェクトをワールドの初期状態に戻す'
-              : 'ロボットの位置をリセット'}
+              : 'ロボットの位置をリセットし、オブジェクトを消去'}
             className="text-sm bg-gray-500 hover:bg-gray-600 text-white px-3 py-1.5 rounded shadow-sm font-medium transition-colors"
           >
             リセット

@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import Editor from '@monaco-editor/react';
+import React, { useState, useEffect, useRef } from 'react';
+import Editor, { type OnMount } from '@monaco-editor/react';
 import { Save, FileCode, Check, AlertCircle } from 'lucide-react';
 
 interface CodeEditorProps {
@@ -13,11 +13,21 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({ filePath, onSaveSuccess 
   const [isLoading, setIsLoading] = useState(false);
   const [saveResult, setSaveResult] = useState<'saved' | 'error' | null>(null);
 
+  const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
+  const handleSaveRef = useRef<() => void>(() => {});
+
   const API_BASE = `http://${window.location.hostname}:8000/api`;
+
+  // ファイル読み込み時は model.setValue で中身を置き換え、undo 履歴をリセットする
+  // （value prop 経由だと読み込みが undo 対象になり、Ctrl+Z で空/プレースホルダまで戻ってしまう）
+  const loadContent = (text: string) => {
+    editorRef.current?.getModel()?.setValue(text);
+    setCode(text);
+  };
 
   useEffect(() => {
     if (!filePath) {
-      setCode('/* 左のファイルツリーからファイルを選択してください */');
+      loadContent('/* 左のファイルツリーからファイルを選択してください */');
       return;
     }
 
@@ -27,9 +37,9 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({ filePath, onSaveSuccess 
         const res = await fetch(`${API_BASE}/file?path=${encodeURIComponent(filePath)}`);
         if (!res.ok) throw new Error('File not found');
         const data = await res.json();
-        setCode(data.content);
+        loadContent(data.content);
       } catch {
-        setCode('// エラー: ファイルを読み込めませんでした');
+        loadContent('// エラー: ファイルを読み込めませんでした');
       } finally {
         setIsLoading(false);
       }
@@ -39,7 +49,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({ filePath, onSaveSuccess 
   }, [filePath]);
 
   const handleSave = async () => {
-    if (!filePath) return;
+    if (!filePath || isSaving || isLoading) return;
     setIsSaving(true);
     setSaveResult(null);
     try {
@@ -62,6 +72,15 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({ filePath, onSaveSuccess 
     } finally {
       setIsSaving(false);
     }
+  };
+
+  handleSaveRef.current = handleSave;
+
+  const handleEditorMount: OnMount = (editor, monaco) => {
+    editorRef.current = editor;
+    // Ctrl+S / Cmd+S（Ctrl+Shift+S も）で保存。エディタにフォーカスがある間はブラウザの保存ダイアログを抑止
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => handleSaveRef.current());
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyS, () => handleSaveRef.current());
   };
 
   const getLanguage = (path: string) => {
@@ -110,6 +129,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({ filePath, onSaveSuccess 
 
         <button
           onClick={handleSave}
+          title="保存 (Ctrl+S)"
           disabled={!filePath || isSaving || isLoading}
           className={`flex items-center gap-1.5 px-3 py-1.5 text-sm font-bold rounded transition-colors ${saveButtonClass()}`}
         >
@@ -125,6 +145,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({ filePath, onSaveSuccess 
           theme="light"
           value={code}
           onChange={(val) => setCode(val || '')}
+          onMount={handleEditorMount}
           options={{
             minimap: { enabled: false },
             fontSize: 14,
