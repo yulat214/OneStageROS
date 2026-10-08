@@ -21,7 +21,8 @@ You will receive an acknowledgement within 72 hours. We aim to release a patch w
 
 ## Scope
 
-This project runs as a local development tool on the user's own machine. The primary attack surface is:
+This project runs as a local development tool on the user's own machine. All services listen on all network interfaces, so access should be restricted to trusted users (for example with a firewall, or by forwarding Docker ports to `127.0.0.1` only). The primary attack surface is:
 - The Express API server (`server/assets-server.js`) — file read/write within `$HOME`
 - URDF/Xacro file processing in `server/sync-minimal.js` and `server/convert-xacro.js`
-- The WebSocket connection to ROS Bridge (port 9090)
+- The terminal WebSocket (`/terminal` on port 8000) and the command execution API
+- The WebSocket connections to ROS Bridge (ports 9090 and 9091)
