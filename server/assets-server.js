@@ -9,8 +9,13 @@ const { spawn, exec } = require('child_process');
 const xml2js = require('xml2js');
 
 // AI設定を server/.env から読み込む（gitignore済み）
-const AI_ENV_PATH = path.join(__dirname, '.env');
-try { require('dotenv').config({ path: AI_ENV_PATH }); } catch {}
+// 設定はリポジトリ直下の .env から読む。以前の場所（server/.env）も引き続き読む。
+// 同じ項目がある場合は、先に読んだリポジトリ直下の .env が優先される（コマンドラインの環境変数はさらに優先）
+const ENV_PATH = path.join(__dirname, '../.env');
+const LEGACY_ENV_PATH = path.join(__dirname, '.env');
+const dotenv = require('dotenv');
+dotenv.config({ path: ENV_PATH, quiet: true });
+dotenv.config({ path: LEGACY_ENV_PATH, quiet: true });
 
 const app = express();
 const PORT = 8000;
@@ -577,14 +582,16 @@ app.get('/api/ai/status', (req, res) => {
     });
 });
 
-// AI設定を server/.env に保存（APIキーはサーバー側にだけ保持）
+// AI設定を .env に保存（APIキーはサーバー側にだけ保持）
 app.post('/api/ai/settings', (req, res) => {
     const { baseUrl, apiKey, model } = req.body || {};
     if (!baseUrl || !model) return res.status(400).json({ error: 'baseUrl と model は必須です' });
+    // 改行を含む値を書き込むと、.env に別の設定行を追加できてしまう
+    if (/[\r\n]/.test(`${baseUrl}${model}${apiKey || ''}`)) return res.status(400).json({ error: '改行を含む値は保存できません' });
 
-    writeEnvVar(AI_ENV_PATH, 'AI_BASE_URL', baseUrl);
-    writeEnvVar(AI_ENV_PATH, 'AI_MODEL', model);
-    if (apiKey) writeEnvVar(AI_ENV_PATH, 'AI_API_KEY', apiKey);
+    writeEnvVar(ENV_PATH, 'AI_BASE_URL', baseUrl);
+    writeEnvVar(ENV_PATH, 'AI_MODEL', model);
+    if (apiKey) writeEnvVar(ENV_PATH, 'AI_API_KEY', apiKey);
 
     process.env.AI_BASE_URL = baseUrl;
     process.env.AI_MODEL = model;
