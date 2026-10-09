@@ -4,19 +4,19 @@
   import path from 'path';
   import { createRequire } from 'module';
 
-  const { isTrustedRequest } = createRequire(import.meta.url)('./server/auth.js');
+  const { isTrustedRequest, isAuthEnabled, loadOrCreateToken, hasValidSession } = createRequire(import.meta.url)('./server/auth.js');
 
   // バックエンド（127.0.0.1:8000）への中継。同一オリジン判定のため、ブラウザが送った Host ヘッダーをそのまま渡す
   const backend = (ws = false) => ({ target: 'http://127.0.0.1:8000', changeOrigin: false, ws });
   // rosbridge（127.0.0.1）へは、バックエンドを通さず直接中継する。
   // バックエンドのシミュレーションや同期処理と、ROS の通信が互いに待たされないようにするため
-  // バックエンドを通らないため、アクセス元の確認（server/auth.js）は中継の前に Vite で行う（false を返すと 404）
-  const rosbridge = (port: number) => ({
+  // バックエンドを通らないため、アクセス元とログインの確認（server/auth.js）は中継の前に Vite で行う（false を返すと 404）
+  const rosbridge = (port: number, isAuthorized: (req: import('http').IncomingMessage) => boolean) => ({
     target: `ws://127.0.0.1:${port}`,
     ws: true,
     changeOrigin: false,
     rewrite: () => '/',
-    bypass: (req: import('http').IncomingMessage) => (isTrustedRequest(req) ? undefined : false),
+    bypass: (req: import('http').IncomingMessage) => (isTrustedRequest(req) && isAuthorized(req) ? undefined : false),
   });
 
   export default defineConfig(({ mode }) => {
@@ -28,6 +28,9 @@
     };
     // true のときだけ、この PC 以外（同じネットワークの PC、Docker のホスト機）からのアクセスを受け付ける
     const expose = /^(1|true|yes|on)$/i.test((env.ONESTAGE_EXPOSE ?? '').trim());
+    // ONESTAGE_AUTH=token のときは、ログインしたブラウザだけが rosbridge に接続できる
+    const token: string | null = isAuthEnabled(env) ? loadOrCreateToken() : null;
+    const isAuthorized = (req: import('http').IncomingMessage) => token === null || hasValidSession(req, token);
 
     return {
       plugins: [tailwindcss(), react()],
@@ -46,15 +49,17 @@
         host: expose ? '0.0.0.0' : '127.0.0.1',
         port: 3000,
         strictPort: true,
-        open: !expose,
+        // ログイン有効時、自動で開くブラウザには URL のフラグメント（# 以降）でトークンを渡す。
+        // フラグメントはサーバーに送られず、ログにも残らない。画面側でログイン後にアドレスバーから消す
+        open: expose ? false : token ? `/#token=${encodeURIComponent(token)}` : true,
         proxy: {
           '/api': backend(),
           '/workspace': backend(),
           '/ros2_data': backend(),
           '/terminal': backend(true),
           // 先頭が ^ のキーは正規表現（/rosbridge が /rosbridge-camera に前方一致しないよう完全一致にする）
-          '^/rosbridge$': rosbridge(9090),
-          '^/rosbridge-camera$': rosbridge(9091),
+          '^/rosbridge$': rosbridge(9090, isAuthorized),
+          '^/rosbridge-camera$': rosbridge(9091, isAuthorized),
         },
       },
     };

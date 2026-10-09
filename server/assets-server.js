@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const { spawn, exec } = require('child_process');
 const xml2js = require('xml2js');
-const { isTrustedRequest } = require('./auth');
+const { isTrustedRequest, isAuthEnabled, loadOrCreateToken, safeEqual, sessionCookie, hasValidSession } = require('./auth');
 
 // AI設定を server/.env から読み込む（gitignore済み）
 // 設定はリポジトリ直下の .env から読む。以前の場所（server/.env）も引き続き読む。
@@ -36,6 +36,33 @@ app.use((req, res, next) => {
     next();
 });
 app.use(express.json({ limit: '1mb' }));
+
+// ONESTAGE_AUTH=token のときは、ログイン（トークンの入力）したブラウザだけが使える
+const AUTH_ENABLED = isAuthEnabled();
+const ACCESS_TOKEN = AUTH_ENABLED ? loadOrCreateToken() : null;
+
+function isAuthorized(req) {
+    return !AUTH_ENABLED || hasValidSession(req, ACCESS_TOKEN);
+}
+
+const loginLimiter = rateLimit({ windowMs: 60_000, max: 10, standardHeaders: true, legacyHeaders: false });
+
+app.post('/api/auth/login', loginLimiter, (req, res) => {
+    if (!AUTH_ENABLED) return res.json({ ok: true });
+    const token = String(req.body?.token || '').trim();
+    if (!token || !safeEqual(token, ACCESS_TOKEN)) return res.status(401).json({ error: 'トークンが正しくありません' });
+    res.setHeader('Set-Cookie', sessionCookie(ACCESS_TOKEN));
+    res.json({ ok: true });
+});
+
+app.get('/api/auth/status', (req, res) => {
+    res.json({ required: AUTH_ENABLED, authenticated: isAuthorized(req) });
+});
+
+app.use((req, res, next) => {
+    if (!isAuthorized(req)) return res.status(401).json({ error: 'Unauthorized' });
+    next();
+});
 app.use((err, req, res, next) => {
     if (err.type === 'entity.too.large') return res.status(413).json({ error: 'Payload too large' });
     if (err instanceof SyntaxError && err.status === 400) return res.status(400).json({ error: 'Invalid JSON' });
@@ -775,6 +802,9 @@ startNode('ros2', [
 const server = app.listen(PORT, BIND_HOST, () => {
     console.log(`Server: http://${BIND_HOST}:${PORT}`);
     console.log(`Editor Root: ${WORKSPACE_ROOT}`);
+    console.log(AUTH_ENABLED
+        ? 'Login: enabled (ONESTAGE_AUTH=token). トークンは npm run token で表示できます'
+        : 'Login: disabled');
 });
 
 // --- ターミナル WebSocket ---
@@ -786,7 +816,7 @@ const wss = new WebSocketServer({
     server,
     path: '/terminal',
     // 接続を受け付ける前に、OneStageROS の画面からの接続かを確認する
-    verifyClient: ({ req }, done) => done(isTrustedRequest(req), 403, 'Forbidden'),
+    verifyClient: ({ req }, done) => done(isTrustedRequest(req) && isAuthorized(req), 403, 'Forbidden'),
 });
 
 wss.on('connection', (ws) => {
