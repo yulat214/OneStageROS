@@ -5,6 +5,9 @@
 
   // バックエンド（127.0.0.1:8000）への中継。同一オリジン判定のため、ブラウザが送った Host ヘッダーをそのまま渡す
   const backend = (ws = false) => ({ target: 'http://127.0.0.1:8000', changeOrigin: false, ws });
+  // rosbridge（127.0.0.1）へは、バックエンドを通さず直接中継する。
+  // バックエンドのシミュレーションや同期処理と、ROS の通信が互いに待たされないようにするため
+  const rosbridge = (port: number) => ({ target: `ws://127.0.0.1:${port}`, ws: true, changeOrigin: false, rewrite: () => '/' });
 
   export default defineConfig(({ mode }) => {
     // サーバーと同じく、リポジトリ直下の .env を server/.env より優先し、コマンドラインの環境変数を最優先にする
@@ -39,8 +42,9 @@
           '/workspace': backend(),
           '/ros2_data': backend(),
           '/terminal': backend(true),
-          '/rosbridge': backend(true),
-          '/rosbridge-camera': backend(true),
+          // 先頭が ^ のキーは正規表現（/rosbridge が /rosbridge-camera に前方一致しないよう完全一致にする）
+          '^/rosbridge$': rosbridge(9090),
+          '^/rosbridge-camera$': rosbridge(9091),
         },
       },
     };

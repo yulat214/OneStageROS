@@ -772,61 +772,13 @@ const server = app.listen(PORT, BIND_HOST, () => {
     console.log(`Editor Root: ${WORKSPACE_ROOT}`);
 });
 
-// --- WebSocket（ターミナル / rosbridge の中継） ---
-const { WebSocketServer, WebSocket } = require('ws');
+// --- ターミナル WebSocket ---
+// rosbridge への WebSocket は Vite（vite.config.ts）が直接中継するため、ここでは扱わない
+const { WebSocketServer } = require('ws');
 const pty = require('node-pty');
 
 const ALLOWED_ORIGINS = ['http://localhost:3000', 'http://127.0.0.1:3000'];
-// 1 つの HTTP サーバーで複数の WebSocket パスを扱うため、noServer で作って upgrade を振り分ける
-const wss = new WebSocketServer({ noServer: true });
-const relayWss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
-const ROSBRIDGE_ROUTES = {
-    '/rosbridge': ROSBRIDGE_PORT,
-    '/rosbridge-camera': ROSBRIDGE_CAMERA_PORT,
-};
-
-function rejectUpgrade(socket, status, message) {
-    socket.end(`HTTP/1.1 ${status} ${message}\r\nConnection: close\r\n\r\n`);
-}
-
-server.on('upgrade', (req, socket, head) => {
-    const pathname = new URL(req.url, 'http://localhost').pathname;
-    if (pathname === '/terminal') {
-        wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
-        return;
-    }
-    const port = ROSBRIDGE_ROUTES[pathname];
-    if (!port) {
-        rejectUpgrade(socket, 404, 'Not Found');
-        return;
-    }
-    // 先に rosbridge へ接続し、つながってからブラウザとの接続を受け付ける。
-    // つながらなければ 502 を返す（ブラウザ側はカメラ用 → 通常の rosbridge に切り替えられる）
-    const upstream = new WebSocket(`ws://${BIND_HOST}:${port}`, { perMessageDeflate: false });
-    const abortUpstream = () => upstream.terminate();
-    socket.once('close', abortUpstream);
-    upstream.once('error', () => rejectUpgrade(socket, 502, 'Bad Gateway'));
-    upstream.once('open', () => {
-        upstream.removeAllListeners('error');
-        socket.removeListener('close', abortUpstream);
-        relayWss.handleUpgrade(req, socket, head, (client) => relayRosbridge(client, upstream));
-    });
-});
-
-// ブラウザと rosbridge の間で、メッセージをそのまま中継する
-function relayRosbridge(client, upstream) {
-    client.on('message', (data, isBinary) => {
-        if (upstream.readyState === WebSocket.OPEN) upstream.send(data, { binary: isBinary });
-    });
-    upstream.on('message', (data, isBinary) => {
-        if (client.readyState === WebSocket.OPEN) client.send(data, { binary: isBinary });
-    });
-    const closeBoth = () => { client.terminate(); upstream.terminate(); };
-    client.on('close', closeBoth);
-    client.on('error', closeBoth);
-    upstream.on('close', closeBoth);
-    upstream.on('error', closeBoth);
-}
+const wss = new WebSocketServer({ server, path: '/terminal' });
 
 wss.on('connection', (ws, req) => {
     const origin = req.headers.origin || '';
@@ -877,7 +829,6 @@ function shutdown(signal) {
     }
     runningProcesses.forEach(proc => proc.kill('SIGINT'));
     wss.close();
-    relayWss.close();
     server.close(() => process.exit(0));
 
     // サーバーが接続を保持したまま閉じきらない場合に備えたフォールバック
