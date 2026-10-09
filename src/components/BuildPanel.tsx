@@ -23,7 +23,7 @@ export const BuildPanel = forwardRef<BuildPanelHandle>((_, ref) => {
   const logEndRef = useRef<HTMLDivElement>(null);
   const esRef = useRef<EventSource | null>(null);
   const runEsRef = useRef<EventSource | null>(null);
-  const API_BASE = `http://${window.location.hostname}:8000/api`;
+  const API_BASE = '/api';
 
   useEffect(() => {
     if (isExpanded) logEndRef.current?.scrollIntoView({ behavior: 'auto' });

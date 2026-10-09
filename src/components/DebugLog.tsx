@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { Terminal, ChevronRight, ChevronDown, Activity, Languages, Settings, X, BotMessageSquare, Pause, Play } from 'lucide-react';
 import * as ROSLIB from 'roslib';
+import { ROSBRIDGE_URL } from '../lib/backend';
 
 interface SnapshotData {
   activeNodes?: string[];
@@ -61,7 +62,6 @@ export function DebugLog() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [isConnected, setIsConnected] = useState(false);
   const rosRef = useRef<ROSLIB.Ros | null>(null);
-  const hostname = window.location.hostname;
 
   // ログ受信の一時停止（購読は維持したまま新規ログの取り込みだけ止める）
   const [isLogPaused, setIsLogPaused] = useState(false);
@@ -74,17 +74,17 @@ export function DebugLog() {
   // AI設定の読み込み
   const fetchAiStatus = useCallback(async () => {
     try {
-      const r = await fetch(`http://${hostname}:8000/api/ai/status`);
+      const r = await fetch(`/api/ai/status`);
       const d: AiStatus = await r.json();
       setAiStatus(d);
       setSettingsForm(f => ({ ...f, baseUrl: d.baseUrl, model: d.model }));
     } catch {}
-  }, [hostname]);
+  }, []);
 
   useEffect(() => { fetchAiStatus(); }, [fetchAiStatus]);
 
   useEffect(() => {
-    const ros = new ROSLIB.Ros({ url: `ws://${hostname}:9090` });
+    const ros = new ROSLIB.Ros({ url: ROSBRIDGE_URL });
     rosRef.current = ros;
     ros.on('connection', () => setIsConnected(true));
     ros.on('close', () => setIsConnected(false));
@@ -152,7 +152,7 @@ export function DebugLog() {
       msg: l.msg,
     }));
     try {
-      const r = await fetch(`http://${hostname}:8000/api/analyze-log`, {
+      const r = await fetch(`/api/analyze-log`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ logs: context }),
@@ -170,7 +170,7 @@ export function DebugLog() {
   const saveAiSettings = async () => {
     setSettingsSaving(true);
     try {
-      const r = await fetch(`http://${hostname}:8000/api/ai/settings`, {
+      const r = await fetch(`/api/ai/settings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ baseUrl: settingsForm.baseUrl, apiKey: settingsForm.apiKey || undefined, model: settingsForm.model }),

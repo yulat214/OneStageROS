@@ -19,6 +19,11 @@ dotenv.config({ path: LEGACY_ENV_PATH, quiet: true });
 
 const app = express();
 const PORT = 8000;
+// バックエンドと rosbridge はこの PC の中（127.0.0.1）でだけ待ち受ける。
+// ブラウザからは Vite（3000）を経由してアクセスする（vite.config.ts の proxy）
+const BIND_HOST = '127.0.0.1';
+const ROSBRIDGE_PORT = 9090;
+const ROSBRIDGE_CAMERA_PORT = 9091;
 const SESSION_ID = Date.now().toString();
 
 const WORKSPACE_ROOT = fs.realpathSync(os.homedir());
@@ -722,7 +727,7 @@ const staticOptions = {
         if (filePath.endsWith('.urdf')) res.setHeader('Content-Type', 'text/xml');
     }
 };
-app.use('/', express.static(ASSETS_DIR, staticOptions), serveIndex(ASSETS_DIR, {'icons': true}));
+app.use('/ros2_data', express.static(ASSETS_DIR, staticOptions), serveIndex(ASSETS_DIR, {'icons': true}));
 app.use('/workspace', express.static(WORKSPACE_ROOT));
 
 const runningProcesses = [];
@@ -740,9 +745,11 @@ function startNode(command, args, label) {
 
 // 1. rosbridge_websocket の起動
 startNode('ros2', [
-    'launch', 
-    'rosbridge_server', 
-    'rosbridge_websocket_launch.xml'
+    'launch',
+    'rosbridge_server',
+    'rosbridge_websocket_launch.xml',
+    `address:=${BIND_HOST}`,
+    `port:=${ROSBRIDGE_PORT}`,
 ], 'Rosbridge');
 
 // 1b. カメラ画像専用の rosbridge（9091）。画像の処理で 9090 の rosbridge が詰まり、
@@ -752,24 +759,74 @@ startNode('ros2', [
     'run',
     'rosbridge_server',
     'rosbridge_websocket',
-    '--ros-args', '-r', '__node:=rosbridge_websocket_camera', '-p', 'port:=9091',
+    '--ros-args', '-r', '__node:=rosbridge_websocket_camera',
+    '-p', `address:=${BIND_HOST}`, '-p', `port:=${ROSBRIDGE_CAMERA_PORT}`,
 ], 'RosbridgeCamera');
 
 // rosapi は 1 の launch ファイルが起動する（ここで別に起動すると同名の /rosapi が 2 つになる）
 
 // ===================================================
 
-const server = app.listen(PORT, () => {
-    console.log(`Server: http://localhost:${PORT}`);
+const server = app.listen(PORT, BIND_HOST, () => {
+    console.log(`Server: http://${BIND_HOST}:${PORT}`);
     console.log(`Editor Root: ${WORKSPACE_ROOT}`);
 });
 
-// --- ターミナル WebSocket ---
-const { WebSocketServer } = require('ws');
+// --- WebSocket（ターミナル / rosbridge の中継） ---
+const { WebSocketServer, WebSocket } = require('ws');
 const pty = require('node-pty');
 
 const ALLOWED_ORIGINS = ['http://localhost:3000', 'http://127.0.0.1:3000'];
-const wss = new WebSocketServer({ server, path: '/terminal' });
+// 1 つの HTTP サーバーで複数の WebSocket パスを扱うため、noServer で作って upgrade を振り分ける
+const wss = new WebSocketServer({ noServer: true });
+const relayWss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
+const ROSBRIDGE_ROUTES = {
+    '/rosbridge': ROSBRIDGE_PORT,
+    '/rosbridge-camera': ROSBRIDGE_CAMERA_PORT,
+};
+
+function rejectUpgrade(socket, status, message) {
+    socket.end(`HTTP/1.1 ${status} ${message}\r\nConnection: close\r\n\r\n`);
+}
+
+server.on('upgrade', (req, socket, head) => {
+    const pathname = new URL(req.url, 'http://localhost').pathname;
+    if (pathname === '/terminal') {
+        wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+        return;
+    }
+    const port = ROSBRIDGE_ROUTES[pathname];
+    if (!port) {
+        rejectUpgrade(socket, 404, 'Not Found');
+        return;
+    }
+    // 先に rosbridge へ接続し、つながってからブラウザとの接続を受け付ける。
+    // つながらなければ 502 を返す（ブラウザ側はカメラ用 → 通常の rosbridge に切り替えられる）
+    const upstream = new WebSocket(`ws://${BIND_HOST}:${port}`, { perMessageDeflate: false });
+    const abortUpstream = () => upstream.terminate();
+    socket.once('close', abortUpstream);
+    upstream.once('error', () => rejectUpgrade(socket, 502, 'Bad Gateway'));
+    upstream.once('open', () => {
+        upstream.removeAllListeners('error');
+        socket.removeListener('close', abortUpstream);
+        relayWss.handleUpgrade(req, socket, head, (client) => relayRosbridge(client, upstream));
+    });
+});
+
+// ブラウザと rosbridge の間で、メッセージをそのまま中継する
+function relayRosbridge(client, upstream) {
+    client.on('message', (data, isBinary) => {
+        if (upstream.readyState === WebSocket.OPEN) upstream.send(data, { binary: isBinary });
+    });
+    upstream.on('message', (data, isBinary) => {
+        if (client.readyState === WebSocket.OPEN) client.send(data, { binary: isBinary });
+    });
+    const closeBoth = () => { client.terminate(); upstream.terminate(); };
+    client.on('close', closeBoth);
+    client.on('error', closeBoth);
+    upstream.on('close', closeBoth);
+    upstream.on('error', closeBoth);
+}
 
 wss.on('connection', (ws, req) => {
     const origin = req.headers.origin || '';
@@ -803,7 +860,7 @@ wss.on('connection', (ws, req) => {
     ptyProc.onExit(() => { if (ws.readyState === 1) ws.close(); });
 });
 
-console.log('Terminal WebSocket: ws://localhost:' + PORT + '/terminal');
+console.log(`Terminal WebSocket: ws://${BIND_HOST}:${PORT}/terminal`);
 
 // ===================================================
 
@@ -820,6 +877,7 @@ function shutdown(signal) {
     }
     runningProcesses.forEach(proc => proc.kill('SIGINT'));
     wss.close();
+    relayWss.close();
     server.close(() => process.exit(0));
 
     // サーバーが接続を保持したまま閉じきらない場合に備えたフォールバック
