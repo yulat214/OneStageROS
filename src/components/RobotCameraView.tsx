@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Video, Radio } from 'lucide-react';
 import * as ROSLIB from 'roslib';
 import type * as THREE from 'three';
+import { ROSBRIDGE_URL, ROSBRIDGE_CAMERA_URL } from '../lib/backend';
 
 // publish する画像の既定解像度（RealSense のカラー/深度の既定値）。
 // cm1 等の利用側はピクセル位置を 640x480 前提で決め打ちしているため、
@@ -29,9 +30,7 @@ const PUBLISH_RATE_STORAGE_KEY = 'robotCameraPublishRateHz';
 // カメラ画像（1 枚あたりカラー+深度で約 3MB の JSON）は専用の rosbridge に送る。
 // 9090 の rosbridge（Python・1 スレッド）で処理させると、処理しきれない PC では画像の処理待ちが溜まり、
 // 同じ rosbridge から届く /onestage/sim_pose・/joint_states が止まって画面描画が固まる。
-// 専用ポートにつながらない（docker のポート公開がない等）ときは 9090 にフォールバックする
-const CAMERA_BRIDGE_PORT = 9091;
-const MAIN_BRIDGE_PORT = 9090;
+// カメラ用の rosbridge につながらないときは、通常の rosbridge にフォールバックする
 const STORAGE_KEY = 'robotCameraFreeView';
 
 type CameraMode = 'robot' | 'free';
@@ -272,8 +271,7 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
   };
 
   useEffect(() => {
-    const hostname = window.location.hostname;
-    const ros = new ROSLIB.Ros({ url: `ws://${hostname}:9090` });
+    const ros = new ROSLIB.Ros({ url: ROSBRIDGE_URL });
     const topic = new ROSLIB.Topic({ ros, name: '/camera/color/camera_info', messageType: 'sensor_msgs/msg/CameraInfo' });
     topic.subscribe((msg: any) => {
       const w: number = msg.width, h: number = msg.height;
@@ -303,7 +301,6 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
   }, [publishEnabled, publishRateHz]);
 
   useEffect(() => {
-    const hostname = window.location.hostname;
     let disposed = false;
     let ros: ROSLIB.Ros | null = null;
     const clearTopics = () => {
@@ -313,11 +310,11 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
       cameraSocketRef.current = null;
     };
 
-    const connect = (port: number) => {
+    const connect = (url: string) => {
       let connected = false;
       let handledDown = false;
       const r = new ROSLIB.Ros({
-        url: `ws://${hostname}:${port}`,
+        url,
         // 送信待ちの量（bufferedAmount）を見て送り過ぎを防ぐため、WebSocket 本体を取っておく
         transportFactory: async (url: string) => {
           const transport = await ROSLIB.WebSocketTransportFactory(url);
@@ -328,7 +325,7 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
       ros = r;
       r.on('connection', () => {
         connected = true;
-        console.log(`[RobotCamera] publishing via rosbridge :${port}`);
+        console.log(`[RobotCamera] publishing via ${url}`);
         imageTopicRef.current = new ROSLIB.Topic({ ros: r, name: '/camera/camera/color/image_raw', messageType: 'sensor_msgs/msg/Image' });
         depthTopicRef.current = new ROSLIB.Topic({ ros: r, name: '/camera/camera/depth/image_rect_raw', messageType: 'sensor_msgs/msg/Image' });
         cameraInfoTopicRef.current = new ROSLIB.Topic({ ros: r, name: '/camera/camera/color/camera_info', messageType: 'sensor_msgs/msg/CameraInfo' });
@@ -342,17 +339,17 @@ export function RobotCameraView({ scene }: RobotCameraViewProps) {
         clearTopics();
         if (handledDown) return; // error と close の両方が来る
         handledDown = true;
-        if (!connected && port === CAMERA_BRIDGE_PORT && !disposed) {
-          console.warn(`[RobotCamera] rosbridge :${CAMERA_BRIDGE_PORT} に接続できないため :${MAIN_BRIDGE_PORT} を使います`);
+        if (!connected && url === ROSBRIDGE_CAMERA_URL && !disposed) {
+          console.warn('[RobotCamera] カメラ用の rosbridge に接続できないため、通常の rosbridge を使います');
           r.close();
-          connect(MAIN_BRIDGE_PORT);
+          connect(ROSBRIDGE_URL);
         }
       };
       r.on('close', onDown);
       r.on('error', onDown);
     };
 
-    connect(CAMERA_BRIDGE_PORT);
+    connect(ROSBRIDGE_CAMERA_URL);
     return () => { disposed = true; clearTopics(); ros?.close(); };
   }, []);
 

@@ -21,7 +21,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, select
   const [createError, setCreateError] = useState<string | null>(null);
   const newFileInputRef = useRef<HTMLInputElement>(null);
 
-  const API_BASE = `http://${window.location.hostname}:8000/api`;
+  const API_BASE = '/api';
 
   const fetchDirectory = async (pathToFetch: string) => {
     setLoading(true);

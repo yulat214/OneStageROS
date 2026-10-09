@@ -84,11 +84,11 @@ OneStageROS を再起動すると自動保存された内容は消えるため�
 
 ## ワールドファイルを起動時に読み込む
 
-`server/.env` の `ONESTAGE_WORLD` に `.sdf` / `.world` ファイルを指定すると、OneStageROS の起動時にそのワールドを読み込みます。
+`.env` の `ONESTAGE_WORLD` に `.sdf` / `.world` ファイルを指定すると、OneStageROS の起動時にそのワールドを読み込みます。
 ROS 2 の launch で `world:=` を指定するのと同じ感覚で使えます。
 
 ```bash
-# server/.env
+# .env
 ONESTAGE_WORLD=ros2_ws/src/my_pkg/worlds/room.world
 ```
 
@@ -101,7 +101,7 @@ ONESTAGE_WORLD=ros2_ws/src/my_pkg/worlds/room.world
 
 ロボットの初期位置は、以下の優先順で決まります。
 
-1. `server/.env` の `ONESTAGE_SPAWN`
+1. `.env` の `ONESTAGE_SPAWN`
 2. ワールドファイル内の、名前が `robot` または `spawn` の `<model>` の `<pose>`（このモデル自体は表示されません）
 3. ワールドファイル内の、最初の `<include>`（`ground_plane`・`sun` を除く）の `<pose>`
 4. 原点（0, 0, 0）
@@ -109,7 +109,7 @@ ONESTAGE_WORLD=ros2_ws/src/my_pkg/worlds/room.world
 `ONESTAGE_SPAWN` は `"x y yaw"`（単位: m, m, rad）の形式で、空白またはカンマで区切ります。`yaw` は省略できます。
 
 ```bash
-# server/.env
+# .env
 ONESTAGE_SPAWN=0.5 -1.0 1.57
 ```
 

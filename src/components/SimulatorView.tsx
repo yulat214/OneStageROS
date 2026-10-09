@@ -5,6 +5,7 @@ import { useROS } from '../hooks/useROS';
 import { useWorldManager, toLayoutEntry } from '../hooks/useWorldManager';
 import { useLidarSim, sliceObstaclesInFrame, LIDAR_HEIGHT } from '../hooks/useLidarSim';
 import { detectGripperProfile, type GripperProfile } from '../hooks/gripperProfiles';
+import { ASSET_BASE_URL } from '../lib/backend';
 
 declare global {
   namespace JSX {
@@ -51,12 +52,11 @@ function ServerFileBrowser({
   const [currentPath, setCurrentPath] = useState('');
   const [items, setItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
-  const hostname = window.location.hostname;
 
   const fetchFiles = useCallback(async (path: string) => {
     setLoading(true);
     try {
-      const res = await fetch(`http://${hostname}:8000/api/ls?path=${path}`);
+      const res = await fetch(`/api/ls?path=${path}`);
       if (!res.ok) throw new Error('Failed to fetch');
       const data = await res.json();
       setItems(data);
@@ -66,7 +66,7 @@ function ServerFileBrowser({
     } finally {
       setLoading(false);
     }
-  }, [hostname]);
+  }, []);
 
   useEffect(() => {
     fetchFiles(''); 
@@ -154,21 +154,19 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   // 切断時にロボットを消すことはしない（一時的な切断・タイムアウトで消えて移動が止まるため）
   const urdfVersionRef = useRef<number | null>(null);
   useEffect(() => {
-    const hostname = window.location.hostname;
-    const ASSET_SERVER_URL = `http://${hostname}:8000/`;
 
     const check = async () => {
       try {
         // customElements.define 前は viewer の urdf setter が機能しないためスキップ
         if (!customElements.get('urdf-viewer')) return;
 
-        const res = await fetch(`${ASSET_SERVER_URL}api/ros/status`);
+        const res = await fetch('/api/ros/status');
         const { connected, version } = await res.json() as { connected: boolean; version: number | null };
         const viewer = viewerRef.current as any;
         if (!viewer || !connected || version === urdfVersionRef.current) return;
 
         urdfVersionRef.current = version;
-        viewer.urdf = `${ASSET_SERVER_URL}robot.urdf?t=${Date.now()}`;
+        viewer.urdf = `${ASSET_BASE_URL}robot.urdf?t=${Date.now()}`;
       } catch {}
     };
 
@@ -179,15 +177,13 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   // initViewer 完了（isLoaded=true）のタイミングで即チェック
   useEffect(() => {
     if (!isLoaded) return;
-    const hostname = window.location.hostname;
-    const ASSET_SERVER_URL = `http://${hostname}:8000/`;
-    fetch(`${ASSET_SERVER_URL}api/ros/status`)
+    fetch('/api/ros/status')
       .then(r => r.json())
       .then(({ connected, version }: { connected: boolean; version: number | null }) => {
         const viewer = viewerRef.current as any;
         if (!viewer || !connected) return;
         urdfVersionRef.current = version;
-        viewer.urdf = `${ASSET_SERVER_URL}robot.urdf?t=${Date.now()}`;
+        viewer.urdf = `${ASSET_BASE_URL}robot.urdf?t=${Date.now()}`;
       })
       .catch(() => {});
   }, [isLoaded]);
@@ -271,7 +267,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   // --- サーバー側シミュレーション（simMode === 'server'）との同期 ---
   // ロボット位置の正はサーバー。ブラウザでの姿勢設定は HTTP で送り、描画は /onestage/sim_pose に従う
   const postSim = useCallback((apiPath: string, body: object) => {
-    return fetch(`http://${window.location.hostname}:8000/api/sim/${apiPath}`, {
+    return fetch(`/api/sim/${apiPath}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -558,8 +554,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
       placementEntryTimeRef.current = Date.now();
 
       try {
-        const hostname = window.location.hostname;
-        const res = await fetch(`http://${hostname}:8000/api/convert-sdf?path=${encodeURIComponent(kind.filePath)}`);
+        const res = await fetch(`/api/convert-sdf?path=${encodeURIComponent(kind.filePath)}`);
         if (!res.ok || !ghostRef.current) return;
         const data = await res.json();
         if (!ghostRef.current) return;
@@ -573,7 +568,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
           const rotY = yaw;
 
           if (obj.type === 'mesh') {
-            const meshUrl = `http://${hostname}:8000${obj.url}`;
+            const meshUrl = obj.url;
             const ext = meshUrl.split('.').pop()?.toLowerCase();
             const orientQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
             const yawQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotY);
@@ -732,7 +727,6 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   ): Promise<ReturnType<typeof toLayoutEntry>[]> => {
     const THREE = threeRef.current;
     if (!THREE) return [];
-    const hostname = window.location.hostname;
     const cosY = Math.cos(userYaw), sinY = Math.sin(userYaw);
     const entries: ReturnType<typeof toLayoutEntry>[] = [];
 
@@ -748,7 +742,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
       const rotY = yaw;
 
       if (obj.type === 'mesh') {
-        const meshUrl = `http://${hostname}:8000${obj.url}`;
+        const meshUrl = obj.url;
         // userYaw × sdfYaw × orientFix
         const orientQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
         const sdfYawQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotY);
@@ -789,8 +783,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   const loadWorldFromSdf = useCallback(async (
     filePath: string,
   ): Promise<{ objects: ReturnType<typeof toLayoutEntry>[]; robot: { x: number; y: number; yaw: number } | null }> => {
-    const hostname = window.location.hostname;
-    const res = await fetch(`http://${hostname}:8000/api/convert-sdf?path=${encodeURIComponent(filePath)}`);
+    const res = await fetch(`/api/convert-sdf?path=${encodeURIComponent(filePath)}`);
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'SDF読み込みエラー');
     const objects = await placeSdfObjects(data, { x: 0, y: 0, z: 0 }, 0);
@@ -888,10 +881,9 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     } else {
       // SDF モデルをクリック位置にオフセット + userYaw で配置
       exitPlacement();
-      const hostname = window.location.hostname;
       try {
         const res = await fetch(
-          `http://${hostname}:8000/api/convert-sdf?path=${encodeURIComponent(placement.filePath)}`
+          `/api/convert-sdf?path=${encodeURIComponent(placement.filePath)}`
         );
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'SDF読み込みエラー');
@@ -938,8 +930,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     if (['sdf', 'world', 'model'].includes(ext)) {
       enterPlacement({ type: 'sdf', filePath });
     } else {
-      const hostname = window.location.hostname;
-      enterPlacement({ type: 'mesh', url: `http://${hostname}:8000/workspace/${filePath}` });
+      enterPlacement({ type: 'mesh', url: `/workspace/${filePath}` });
     }
   };
 
@@ -961,8 +952,6 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
 
         const viewer = viewerRef.current as any;
         if (!viewer) return;
-        const hostname = window.location.hostname;
-        const ASSET_SERVER_URL = `http://${hostname}:8000/`;
 
         // URDF読込完了ごとに移動機構の有無を判定する。
         // "world" リンクへの fixed joint はロボットを台に固定する慣習（lerobot等の固定アーム）であり、
@@ -986,10 +975,10 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
              const marker = '/share/';
              const index = path.lastIndexOf(marker);
              if (index > -1) {
-                 resolvedPath = ASSET_SERVER_URL + "realsense-ros/" + path.substring(index + marker.length);
+                 resolvedPath = ASSET_BASE_URL + "realsense-ros/" + path.substring(index + marker.length);
              }
           } else {
-            resolvedPath = ASSET_SERVER_URL + path;
+            resolvedPath = ASSET_BASE_URL + path;
           }
 
           const ext = path.split(/\./g).pop()?.toLowerCase();
@@ -1047,7 +1036,6 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   //  - なし: 従来どおり localStorage(onestage_ros_environment) から復元
   useEffect(() => {
     if (!isLoaded) return;
-    const hostname = window.location.hostname;
 
     (async () => {
       let cfg: {
@@ -1057,7 +1045,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
         spawn?: { x: number; y: number; yaw: number } | null;
       } = {};
       try {
-        const r = await fetch(`http://${hostname}:8000/api/world-config`);
+        const r = await fetch(`/api/world-config`);
         cfg = await r.json();
       } catch {}
       if (cfg.error) console.warn('[world]', cfg.error);

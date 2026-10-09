@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-10-09
+
+### Changed
+- **Breaking:** The browser connects only to port 3000. The backend API and terminal (`/api`, `/workspace`, `/ros2_data`, `/terminal`) are proxied by Vite to the backend, and ROS Bridge (`/rosbridge`, `/rosbridge-camera`) is proxied by Vite directly to ROS Bridge
+- **Breaking:** The backend (8000) and ROS Bridge (9090, 9091) always listen on `127.0.0.1`. Programs on a Docker host can no longer connect to ROS Bridge directly
+- **Breaking:** The web UI (3000) listens on `127.0.0.1` by default. Set `ONESTAGE_EXPOSE=true` to allow access from a Docker host or other machines. Docker setups only need to forward port 3000
+- **Breaking:** ROS asset files are served under `/ros2_data/` instead of the server root
+- Settings are read from `.env` in the repository root (`server/.env` is still read). AI settings saved from the UI are written to `.env` in the repository root
+
+### Added
+- Optional login (`ONESTAGE_AUTH=token`). The token is stored in `~/.config/onestage-ros/token` and shown by `npm run token` (`npm run token -- --reset` regenerates it). The browser opened by `npm start` logs in automatically
+- `.env.example`
+
+### Security
+- Requests from other web sites and from other ports on the same host are rejected (`Origin`, `Sec-Fetch-Site`). Previously, any web page could run commands through `/api/run` and connect to ROS Bridge
+- Requests whose `Host` is not `localhost` or an IP address are rejected (DNS rebinding)
+- AI settings containing line breaks are rejected, so that other settings cannot be written into `.env`
+- All `.env*` files except `.env.example` are excluded from Git
+
 ## [1.1.2] - 2026-10-08
 
 ### Fixed

@@ -16,7 +16,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({ filePath, onSaveSuccess 
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
   const handleSaveRef = useRef<() => void>(() => {});
 
-  const API_BASE = `http://${window.location.hostname}:8000/api`;
+  const API_BASE = '/api';
 
   // ファイル読み込み時は model.setValue で中身を置き換え、undo 履歴をリセットする
   // （value prop 経由だと読み込みが undo 対象になり、Ctrl+Z で空/プレースホルダまで戻ってしまう）

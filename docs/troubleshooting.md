@@ -19,17 +19,38 @@
   sudo apt install ros-humble-rosbridge-suite
   ```
 
-- ポート 9090 を他のプログラムが使用していないか確認してください。
+- ポート 9090・9091 を他のプログラム（別に起動した ROS Bridge など）が使用していないか確認してください。OneStageROS は内部でこれらのポートを使用します。
 - `npm start` を、ROS 2 の環境を `source` したターミナルで実行しているか確認してください。
 
-## 別の PC や Docker のホスト機から開けない
+## Docker のホスト機や別の PC から開けない
 
-- ブラウザのアドレスは `http://<OneStageROS を動かしている PC の IP アドレス>:3000` です。
-- Docker の場合は、3000・8000・9090・9091 の 4 つのポートを転送しているか確認してください（[設定](configuration.md#docker-で使う場合)）。
+- `.env`（または `docker-compose.yaml` の `environment:`）で `ONESTAGE_EXPOSE=true` を設定し、OneStageROS を再起動してください。既定（`false`）では、OneStageROS を動かしている PC（コンテナ）の中からしか開けません（[設定](configuration.md#ネットワーク公開)）。
+- Docker の場合は、ポート `3000` を転送しているか確認してください。`8000`・`9090`・`9091` の転送は不要です。
+- 別の PC から開く場合、ブラウザのアドレスは `http://<OneStageROS を動かしている PC の IP アドレス>:3000` です。
 
-## `npm start` で `Port 3000 is already in use` と表示される
+## 画面は開くが、ロボットが表示されない・API が `403 Forbidden` になる
 
-OneStageROS がすでに起動しているか、他のプログラムがポート 3000 を使用しています。起動中の OneStageROS を `Ctrl+C` で停止してから、もう一度実行してください。
+OneStageROS は、`localhost` と IP アドレス以外のホスト名でのアクセスや、他の Web サイトからのリクエストを拒否します（[設定](configuration.md#アクセス元の確認)）。
+
+- ブラウザのアドレスが `http://localhost:3000`、`http://127.0.0.1:3000`、または `http://<IP アドレス>:3000` になっているか確認してください。`http://mypc.local:3000` のようなホスト名では開けません。
+- ブラウザの拡張機能が通信の内容を書き換えている場合は、拡張機能を無効にして試してください。
+
+## ログイン画面が表示される・トークンが正しくないと表示される
+
+ログイン画面は `ONESTAGE_AUTH=token` を設定した場合に表示されます（[設定](configuration.md#ログイン)）。
+
+- OneStageROS を動かしている環境（Docker の場合はコンテナ内）のターミナルで `npm run token` を実行し、表示されたトークンを入力してください。
+- `npm run token -- --reset` でトークンを再発行した場合は、OneStageROS を再起動してから新しいトークンを入力してください。
+- 1 分間に 10 回を超えてログインを試すと、しばらくログインできなくなります。1 分ほど待ってから再度お試しください。
+
+## ホスト機のプログラムから ROS Bridge（`ws://localhost:9090`）に接続できない
+
+ROS Bridge は OneStageROS の内部（`127.0.0.1`）でのみ待ち受けるため、Docker のホスト機などから直接は接続できません。
+ROS 2 のノードとして同じ環境（コンテナ内）で動かすか、ブラウザと同じく `ws://localhost:3000/rosbridge` に接続してください（ログインを有効にしている場合は接続できません）。
+
+## `npm start` で `Port 3000 is already in use` または `EADDRINUSE` と表示される
+
+OneStageROS がすでに起動しているか、他のプログラムがポート 3000・8000 を使用しています。起動中の OneStageROS を `Ctrl+C` で停止してから、もう一度実行してください。
 
 ## ロボットが動かない
 

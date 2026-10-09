@@ -68,14 +68,14 @@ AI 解析を使うには、OpenAI 互換の Chat Completions API の API キー�
 
 - 既定では [Groq](https://console.groq.com/) の API を使用します。Groq のアカウントを作成し、API キーを発行して入力してください。
 - OpenAI など、OpenAI 互換の API であれば Base URL と Model を変更して利用できます。
-- 設定はサーバー側の `server/.env` に保存され、API キーがブラウザに送り返されることはありません。
+- 設定はサーバー側の `.env` に保存され、API キーがブラウザに送り返されることはありません。
 - API キーを設定すると 🤖 ボタンが緑色になります。
 
-`server/.env` に直接記述することもできます（[設定](configuration.md) を参照）。
+`.env` に直接記述することもできます（[設定](configuration.md) を参照）。
 
 ### 解析の指示文を変更する
 
-`server/.env` の `AI_SYSTEM_PROMPT` に指示文を記述すると、AI への指示を差し替えられます。
+`.env` の `AI_SYSTEM_PROMPT` に指示文を記述すると、AI への指示を差し替えられます。
 説明の詳しさや口調を用途に合わせて変えたい場合に使います。変更後は OneStageROS を再起動してください。
 
 > AI 解析を使うと、ログの内容が設定した API サービスに送信されます。

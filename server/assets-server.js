@@ -1,5 +1,4 @@
 const express = require('express');
-const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const serveIndex = require('serve-index');
 const path = require('path');
@@ -7,20 +6,62 @@ const fs = require('fs');
 const os = require('os');
 const { spawn, exec } = require('child_process');
 const xml2js = require('xml2js');
+const { isTrustedRequest, isAuthEnabled, loadOrCreateToken, safeEqual, sessionCookie, hasValidSession } = require('./auth');
 
-// AI設定を server/.env から読み込む（gitignore済み）
-const AI_ENV_PATH = path.join(__dirname, '.env');
-try { require('dotenv').config({ path: AI_ENV_PATH }); } catch {}
+// 設定はリポジトリ直下の .env から読む。以前の場所（server/.env）も引き続き読む。
+// 同じ項目がある場合は、先に読んだリポジトリ直下の .env が優先される（コマンドラインの環境変数はさらに優先）
+const ENV_PATH = path.join(__dirname, '../.env');
+const LEGACY_ENV_PATH = path.join(__dirname, '.env');
+const dotenv = require('dotenv');
+dotenv.config({ path: ENV_PATH, quiet: true });
+dotenv.config({ path: LEGACY_ENV_PATH, quiet: true });
 
 const app = express();
 const PORT = 8000;
+// バックエンドと rosbridge はこの PC の中（127.0.0.1）でだけ待ち受ける。
+// ブラウザからは Vite（3000）を経由してアクセスする（vite.config.ts の proxy）
+const BIND_HOST = '127.0.0.1';
+const ROSBRIDGE_PORT = 9090;
+const ROSBRIDGE_CAMERA_PORT = 9091;
 const SESSION_ID = Date.now().toString();
 
 const WORKSPACE_ROOT = fs.realpathSync(os.homedir());
 const ASSETS_DIR = path.join(__dirname, '../ros2_data');
 
-app.use(cors({ origin: [`http://localhost:3000`, `http://127.0.0.1:3000`] }));
+// 他の Web サイト・同じ PC の別ポートのページ・localhost / IP アドレス以外のホスト名（DNS rebinding）からの
+// リクエストを拒否する。画面と同じオリジン（Vite 経由）からしか呼ばれないため CORS の設定は不要
+app.use((req, res, next) => {
+    if (!isTrustedRequest(req)) return res.status(403).json({ error: 'Forbidden' });
+    next();
+});
 app.use(express.json({ limit: '1mb' }));
+
+// ONESTAGE_AUTH=token のときは、ログイン（トークンの入力）したブラウザだけが使える
+const AUTH_ENABLED = isAuthEnabled();
+const ACCESS_TOKEN = AUTH_ENABLED ? loadOrCreateToken() : null;
+
+function isAuthorized(req) {
+    return !AUTH_ENABLED || hasValidSession(req, ACCESS_TOKEN);
+}
+
+const loginLimiter = rateLimit({ windowMs: 60_000, max: 10, standardHeaders: true, legacyHeaders: false });
+
+app.post('/api/auth/login', loginLimiter, (req, res) => {
+    if (!AUTH_ENABLED) return res.json({ ok: true });
+    const token = String(req.body?.token || '').trim();
+    if (!token || !safeEqual(token, ACCESS_TOKEN)) return res.status(401).json({ error: 'トークンが正しくありません' });
+    res.setHeader('Set-Cookie', sessionCookie(ACCESS_TOKEN));
+    res.json({ ok: true });
+});
+
+app.get('/api/auth/status', (req, res) => {
+    res.json({ required: AUTH_ENABLED, authenticated: isAuthorized(req) });
+});
+
+app.use((req, res, next) => {
+    if (!isAuthorized(req)) return res.status(401).json({ error: 'Unauthorized' });
+    next();
+});
 app.use((err, req, res, next) => {
     if (err.type === 'entity.too.large') return res.status(413).json({ error: 'Payload too large' });
     if (err instanceof SyntaxError && err.status === 400) return res.status(400).json({ error: 'Invalid JSON' });
@@ -577,14 +618,16 @@ app.get('/api/ai/status', (req, res) => {
     });
 });
 
-// AI設定を server/.env に保存（APIキーはサーバー側にだけ保持）
+// AI設定を .env に保存（APIキーはサーバー側にだけ保持）
 app.post('/api/ai/settings', (req, res) => {
     const { baseUrl, apiKey, model } = req.body || {};
     if (!baseUrl || !model) return res.status(400).json({ error: 'baseUrl と model は必須です' });
+    // 改行を含む値を書き込むと、.env に別の設定行を追加できてしまう
+    if (/[\r\n]/.test(`${baseUrl}${model}${apiKey || ''}`)) return res.status(400).json({ error: '改行を含む値は保存できません' });
 
-    writeEnvVar(AI_ENV_PATH, 'AI_BASE_URL', baseUrl);
-    writeEnvVar(AI_ENV_PATH, 'AI_MODEL', model);
-    if (apiKey) writeEnvVar(AI_ENV_PATH, 'AI_API_KEY', apiKey);
+    writeEnvVar(ENV_PATH, 'AI_BASE_URL', baseUrl);
+    writeEnvVar(ENV_PATH, 'AI_MODEL', model);
+    if (apiKey) writeEnvVar(ENV_PATH, 'AI_API_KEY', apiKey);
 
     process.env.AI_BASE_URL = baseUrl;
     process.env.AI_MODEL = model;
@@ -715,7 +758,7 @@ const staticOptions = {
         if (filePath.endsWith('.urdf')) res.setHeader('Content-Type', 'text/xml');
     }
 };
-app.use('/', express.static(ASSETS_DIR, staticOptions), serveIndex(ASSETS_DIR, {'icons': true}));
+app.use('/ros2_data', express.static(ASSETS_DIR, staticOptions), serveIndex(ASSETS_DIR, {'icons': true}));
 app.use('/workspace', express.static(WORKSPACE_ROOT));
 
 const runningProcesses = [];
@@ -733,9 +776,11 @@ function startNode(command, args, label) {
 
 // 1. rosbridge_websocket の起動
 startNode('ros2', [
-    'launch', 
-    'rosbridge_server', 
-    'rosbridge_websocket_launch.xml'
+    'launch',
+    'rosbridge_server',
+    'rosbridge_websocket_launch.xml',
+    `address:=${BIND_HOST}`,
+    `port:=${ROSBRIDGE_PORT}`,
 ], 'Rosbridge');
 
 // 1b. カメラ画像専用の rosbridge（9091）。画像の処理で 9090 の rosbridge が詰まり、
@@ -745,32 +790,35 @@ startNode('ros2', [
     'run',
     'rosbridge_server',
     'rosbridge_websocket',
-    '--ros-args', '-r', '__node:=rosbridge_websocket_camera', '-p', 'port:=9091',
+    '--ros-args', '-r', '__node:=rosbridge_websocket_camera',
+    '-p', `address:=${BIND_HOST}`, '-p', `port:=${ROSBRIDGE_CAMERA_PORT}`,
 ], 'RosbridgeCamera');
 
 // rosapi は 1 の launch ファイルが起動する（ここで別に起動すると同名の /rosapi が 2 つになる）
 
 // ===================================================
 
-const server = app.listen(PORT, () => {
-    console.log(`Server: http://localhost:${PORT}`);
+const server = app.listen(PORT, BIND_HOST, () => {
+    console.log(`Server: http://${BIND_HOST}:${PORT}`);
     console.log(`Editor Root: ${WORKSPACE_ROOT}`);
+    console.log(AUTH_ENABLED
+        ? 'Login: enabled (ONESTAGE_AUTH=token). トークンは npm run token で表示できます'
+        : 'Login: disabled');
 });
 
 // --- ターミナル WebSocket ---
+// rosbridge への WebSocket は Vite（vite.config.ts）が直接中継するため、ここでは扱わない
 const { WebSocketServer } = require('ws');
 const pty = require('node-pty');
 
-const ALLOWED_ORIGINS = ['http://localhost:3000', 'http://127.0.0.1:3000'];
-const wss = new WebSocketServer({ server, path: '/terminal' });
+const wss = new WebSocketServer({
+    server,
+    path: '/terminal',
+    // 接続を受け付ける前に、OneStageROS の画面からの接続かを確認する
+    verifyClient: ({ req }, done) => done(isTrustedRequest(req) && isAuthorized(req), 403, 'Forbidden'),
+});
 
-wss.on('connection', (ws, req) => {
-    const origin = req.headers.origin || '';
-    if (!ALLOWED_ORIGINS.includes(origin)) {
-        ws.close(1008, 'Forbidden');
-        return;
-    }
-
+wss.on('connection', (ws) => {
     const shell = process.env.SHELL || '/bin/bash';
     const ptyProc = pty.spawn(shell, [], {
         name: 'xterm-256color',
@@ -796,7 +844,7 @@ wss.on('connection', (ws, req) => {
     ptyProc.onExit(() => { if (ws.readyState === 1) ws.close(); });
 });
 
-console.log('Terminal WebSocket: ws://localhost:' + PORT + '/terminal');
+console.log(`Terminal WebSocket: ws://${BIND_HOST}:${PORT}/terminal`);
 
 // ===================================================
 

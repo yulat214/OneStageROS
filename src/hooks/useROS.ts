@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as ROSLIB from 'roslib';
+import { ROSBRIDGE_URL } from '../lib/backend';
 
 type RosStamp = { sec: number; nanosec: number };
 
@@ -37,8 +38,7 @@ export function useROS(jointTopic: string) {
   const selfInitialPoseStampRef = useRef<RosStamp | null>(null);
 
   useEffect(() => {
-    const hostname = window.location.hostname;
-    const ros = new ROSLIB.Ros({ url: `ws://${hostname}:9090` });
+    const ros = new ROSLIB.Ros({ url: ROSBRIDGE_URL });
     rosRef.current = ros;
     let disposed = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -178,7 +178,7 @@ export function useROS(jointTopic: string) {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const check = async () => {
       try {
-        const res = await fetch(`http://${window.location.hostname}:8000/api/sim/status`);
+        const res = await fetch('/api/sim/status');
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const { enabled } = await res.json() as { enabled: boolean };
         if (cancelled) return;

@@ -3,6 +3,7 @@ import { Terminal as TerminalIcon, X } from 'lucide-react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import { wsUrl } from '../lib/backend';
 
 interface Props {
   isOpen: boolean;
@@ -66,7 +67,7 @@ export const TerminalPanel: React.FC<Props> = ({ isOpen, height, onClose, onHeig
         termRef.current = term;
         fitRef.current = fitAddon;
 
-        const ws = new WebSocket(`ws://${window.location.hostname}:8000/terminal`);
+        const ws = new WebSocket(wsUrl('/terminal'));
         wsRef.current = ws;
 
         ws.onopen = () => term.writeln('\x1b[32m接続しました\x1b[0m');
