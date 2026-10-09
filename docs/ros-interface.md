@@ -10,8 +10,8 @@ OneStageROS が ROS 2 とやり取りするトピック・ノードの一覧で�
 
 | ノード | 用途 |
 |--------|------|
-| `rosbridge_websocket` | ブラウザと ROS 2 の通信（ポート 9090） |
-| `rosbridge_websocket_camera` | カメラ画像の配信（ポート 9091） |
+| `rosbridge_websocket` | ブラウザと ROS 2 の通信（内部ポート 9090。ブラウザからはポート 3000 の `/rosbridge` 経由で接続） |
+| `rosbridge_websocket_camera` | カメラ画像の配信（内部ポート 9091。ブラウザからはポート 3000 の `/rosbridge-camera` 経由で接続） |
 | `rosapi` | ノード・トピック一覧の取得 |
 | `onestage_graph_monitor` | ROS ノードの監視と、LiDAR・オドメトリ・TF の配信 |
 

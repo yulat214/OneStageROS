@@ -24,7 +24,7 @@ OneStageROS は、ROS 2 のロボット制御とデバッグをブラウザ 1 �
 
 その他のドキュメント:
 
-- [設定（環境変数・Docker での利用）](docs/configuration.md)
+- [設定（環境変数・Docker での利用・ネットワーク公開・ログイン）](docs/configuration.md)
 - [ROS インターフェース一覧（購読・配信トピック）](docs/ros-interface.md)
 - [トラブルシューティング](docs/troubleshooting.md)
 
@@ -38,16 +38,16 @@ OneStageROS は、ROS 2 のロボット制御とデバッグをブラウザ 1 �
 - **ROS パッケージ**: `rosbridge_suite`（`rosbridge_server` と `rosapi` を含みます）
 - **ブラウザ**: Google Chrome / Microsoft Edge / Firefox の最新版
 
-OneStageROS は以下のポートを使用します。
+ブラウザから接続するポートは `3000` だけです。
 
-| ポート | 用途 |
-|--------|------|
-| `3000` | Web 画面 |
-| `8000` | バックエンド API・ターミナル |
-| `9090` | ROS Bridge（WebSocket） |
-| `9091` | カメラ画像専用の ROS Bridge（WebSocket） |
+| ポート | 用途 | 待ち受けるアドレス |
+|--------|------|--------------------|
+| `3000` | Web 画面（バックエンド・ターミナル・ROS Bridge への通信もここを経由します） | 既定では `127.0.0.1`。`ONESTAGE_EXPOSE=true` で全インターフェース |
+| `8000` | バックエンド API・ターミナル（内部用） | 常に `127.0.0.1` |
+| `9090` | ROS Bridge（内部用） | 常に `127.0.0.1` |
+| `9091` | カメラ画像専用の ROS Bridge（内部用） | 常に `127.0.0.1` |
 
-> **注意**: これらのポートは、すべてのネットワークインターフェースで待ち受けます。OneStageROS にアクセスできる人は、ホームディレクトリ内のファイルの閲覧・編集や、ターミナルからのコマンド実行ができます。信頼できないネットワークに接続した PC で使う場合は、ファイアウォールなどでこれらのポートへの外部からのアクセスを制限してください。Docker で使う場合は、ポート転送を `127.0.0.1` に限定してください（[設定](docs/configuration.md#docker-で使う場合)）。
+起動時のログに表示される `8000`・`9090`・`9091` は内部用のポートで、公開する必要はありません。
 
 ---
 
@@ -76,8 +76,24 @@ npm install
 
 ### 3. 設定（任意）
 
-起動時に読み込むワールドや AI 解析の設定は、`server/.env` に記述します。
-詳しくは [設定](docs/configuration.md) を参照してください。
+設定はリポジトリ直下の `.env` に記述します。ひな形をコピーして編集してください。
+
+```bash
+cp .env.example .env
+```
+
+既定では、OneStageROS を起動した PC（`localhost`）からのみ使えます。
+**Docker コンテナで動かしてホスト機のブラウザから使う場合は、`ONESTAGE_EXPOSE=true` を設定し、ポート `3000` だけを転送してください。**
+
+```yaml
+# docker-compose.yaml
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - ONESTAGE_EXPOSE=true
+```
+
+別の PC から使う場合は、ログイン（`ONESTAGE_AUTH=token`）も有効にしてください。詳しくは [設定](docs/configuration.md) を参照してください。
 
 ---
 
@@ -115,7 +131,20 @@ ROS Bridge とバックエンドが自動で起動します。
 [http://localhost:3000](http://localhost:3000) にアクセスします。
 ロボットが起動していれば、数秒でシミュレータにロボットが表示されます。
 
+ログイン（`ONESTAGE_AUTH=token`）を有効にしている場合は、ログイン画面に `npm run token` で表示されるトークンを入力してください。
+
 終了するときは、`npm start` を実行したターミナルで `Ctrl+C` を押してください。
+
+### 新しいバージョンに更新する
+
+```bash
+cd ~/OneStageROS
+git pull
+source /opt/ros/humble/setup.bash
+npm install
+```
+
+依存パッケージが変わることがあるため、更新したあとは `npm install` を実行してください。
 
 ---
 

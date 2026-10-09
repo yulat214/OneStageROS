@@ -11,9 +11,10 @@ Thank you for your interest in contributing!
 ## Getting Started
 
 1. Fork the repository and clone your fork
-2. Install dependencies: `npm install`
-3. Start the dev environment: `npm start`
-4. Open `http://localhost:3000` in your browser
+2. Install dependencies: `npm install` (in a terminal where ROS 2 is sourced)
+3. Copy the settings file: `cp .env.example .env` (never commit `.env`)
+4. Start the dev environment: `npm start`
+5. Open `http://localhost:3000` in your browser (opened automatically by `npm start`)
 
 ## Submitting Changes
 
