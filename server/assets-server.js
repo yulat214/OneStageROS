@@ -8,7 +8,6 @@ const { spawn, exec } = require('child_process');
 const xml2js = require('xml2js');
 const { isTrustedRequest, isAuthEnabled, loadOrCreateToken, safeEqual, sessionCookie, hasValidSession } = require('./auth');
 
-// AI設定を server/.env から読み込む（gitignore済み）
 // 設定はリポジトリ直下の .env から読む。以前の場所（server/.env）も引き続き読む。
 // 同じ項目がある場合は、先に読んだリポジトリ直下の .env が優先される（コマンドラインの環境変数はさらに優先）
 const ENV_PATH = path.join(__dirname, '../.env');
