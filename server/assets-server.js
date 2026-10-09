@@ -1,5 +1,4 @@
 const express = require('express');
-const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const serveIndex = require('serve-index');
 const path = require('path');
@@ -7,6 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const { spawn, exec } = require('child_process');
 const xml2js = require('xml2js');
+const { isTrustedRequest } = require('./auth');
 
 // AI設定を server/.env から読み込む（gitignore済み）
 // 設定はリポジトリ直下の .env から読む。以前の場所（server/.env）も引き続き読む。
@@ -29,7 +29,12 @@ const SESSION_ID = Date.now().toString();
 const WORKSPACE_ROOT = fs.realpathSync(os.homedir());
 const ASSETS_DIR = path.join(__dirname, '../ros2_data');
 
-app.use(cors({ origin: [`http://localhost:3000`, `http://127.0.0.1:3000`] }));
+// 他の Web サイト・同じ PC の別ポートのページ・localhost / IP アドレス以外のホスト名（DNS rebinding）からの
+// リクエストを拒否する。画面と同じオリジン（Vite 経由）からしか呼ばれないため CORS の設定は不要
+app.use((req, res, next) => {
+    if (!isTrustedRequest(req)) return res.status(403).json({ error: 'Forbidden' });
+    next();
+});
 app.use(express.json({ limit: '1mb' }));
 app.use((err, req, res, next) => {
     if (err.type === 'entity.too.large') return res.status(413).json({ error: 'Payload too large' });
@@ -777,16 +782,14 @@ const server = app.listen(PORT, BIND_HOST, () => {
 const { WebSocketServer } = require('ws');
 const pty = require('node-pty');
 
-const ALLOWED_ORIGINS = ['http://localhost:3000', 'http://127.0.0.1:3000'];
-const wss = new WebSocketServer({ server, path: '/terminal' });
+const wss = new WebSocketServer({
+    server,
+    path: '/terminal',
+    // 接続を受け付ける前に、OneStageROS の画面からの接続かを確認する
+    verifyClient: ({ req }, done) => done(isTrustedRequest(req), 403, 'Forbidden'),
+});
 
-wss.on('connection', (ws, req) => {
-    const origin = req.headers.origin || '';
-    if (!ALLOWED_ORIGINS.includes(origin)) {
-        ws.close(1008, 'Forbidden');
-        return;
-    }
-
+wss.on('connection', (ws) => {
     const shell = process.env.SHELL || '/bin/bash';
     const ptyProc = pty.spawn(shell, [], {
         name: 'xterm-256color',
