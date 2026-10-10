@@ -1,15 +1,21 @@
 // ログインの状態確認とログイン（ONESTAGE_AUTH=token のときだけ必要）
 
 // ログインが無効（ONESTAGE_AUTH 未設定）の場合も true を返す
+// npm run start 直後は Vite だけが先に起動していて、バックエンドへの中継が失敗（5xx）するので、
+// 未ログイン扱いにせず、バックエンドが応答するまで待つ（30 秒で諦めてログイン画面を出す）
 export async function isAuthenticated(): Promise<boolean> {
-  try {
-    const res = await fetch('/api/auth/status');
-    if (!res.ok) return false;
-    const { authenticated } = await res.json();
-    return !!authenticated;
-  } catch {
-    return false;
+  for (let i = 0; i < 30; i++) {
+    try {
+      const res = await fetch('/api/auth/status');
+      if (res.ok) {
+        const { authenticated } = await res.json();
+        return !!authenticated;
+      }
+      if (res.status < 500) return false;
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 1000));
   }
+  return false;
 }
 
 export async function login(token: string): Promise<{ ok: true } | { ok: false; error: string }> {
