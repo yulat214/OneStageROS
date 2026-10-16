@@ -21,6 +21,8 @@ export function useROS(jointTopic: string) {
 
   // 描画ループ内で参照・更新するためのRef
   const jointPositionsRef = useRef<Map<string, number>>(new Map());
+  // 関節ごとに最初に受信した角度（リセット時の戻り先）
+  const initialJointPositionsRef = useRef<Map<string, number>>(new Map());
   const cmdVelRef = useRef({ linearX: 0, angularZ: 0 });
   const needsUpdateRef = useRef(false);
   const rosRef = useRef<ROSLIB.Ros | null>(null);
@@ -115,6 +117,9 @@ export function useROS(jointTopic: string) {
     jointListener.subscribe((message: any) => {
       for (let i = 0; i < message.name.length; i++) {
         jointPositionsRef.current.set(message.name[i], message.position[i]);
+        if (!initialJointPositionsRef.current.has(message.name[i])) {
+          initialJointPositionsRef.current.set(message.name[i], message.position[i]);
+        }
       }
       needsUpdateRef.current = true;
     });
@@ -437,5 +442,13 @@ export function useROS(jointTopic: string) {
     return true;
   }, []);
 
-  return { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, publishTF, odomPoseRef, initialPoseRef, simMode, simModeRef, simPoseRef, publishInitialPose };
+  // 3D ビューの関節角を最初に受信した角度に戻す（ROS 側へは何も送らない）
+  const resetJoints = useCallback(() => {
+    initialJointPositionsRef.current.forEach((position, name) => {
+      jointPositionsRef.current.set(name, position);
+    });
+    needsUpdateRef.current = true;
+  }, []);
+
+  return { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, publishTF, odomPoseRef, initialPoseRef, simMode, simModeRef, simPoseRef, publishInitialPose, resetJoints };
 }
