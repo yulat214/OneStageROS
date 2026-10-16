@@ -442,10 +442,77 @@ export function useROS(jointTopic: string) {
     return true;
   }, []);
 
-  // 3D ビューの関節角を最初に受信した角度に戻す（ROS 側へは何も送らない）
-  const resetJoints = useCallback(() => {
-    initialJointPositionsRef.current.forEach((position, name) => {
-      jointPositionsRef.current.set(name, position);
+  // 関節角を最初に受信した角度に戻す。
+  // ros2_control のコントローラが動いていれば指令を送って実際に戻す:
+  //   - JointTrajectoryController: <name>/joint_trajectory に軌道を publish
+  //     （fake / mock ハードウェアなら 10 ms＝ほぼ瞬時、それ以外は 3 秒かけて戻す）
+  //   - GripperActionController: <name>/gripper_cmd に GripperCommand を送る
+  // コントローラが受け持たない関節は 3D ビューの表示だけ上書きする。
+  // コントローラの種類は controller_manager のパラメータ <name>.type で判定する
+  // （Humble の rosapi は action_servers / action_type を呼ぶとクラッシュするため使わない）。
+  const resetJoints = useCallback(async () => {
+    const initial = initialJointPositionsRef.current;
+    const ros = rosRef.current;
+    const covered = new Set<string>();
+
+    if (ros && initial.size > 0) {
+      const call = (name: string, serviceType: string, request: object) =>
+        new Promise<any>((resolve, reject) => {
+          new ROSLIB.Service({ ros, name, serviceType }).callService(request, resolve, reject, 5000);
+        });
+      // rosapi の get_param は "ノード名:パラメータ名" で指定し、値は JSON 文字列で返る（未定義なら "" か空）
+      const getParam = async (node: string, param: string) => {
+        try {
+          const res = await call('/rosapi/get_param', 'rosapi_msgs/srv/GetParam', { name: `${node}:${param}`, default_value: '' });
+          return res.value ? JSON.parse(res.value) : null;
+        } catch { return null; }
+      };
+
+      try {
+        // ハードウェアが fake / mock だけならその場で切り替え、実機などが含まれていればゆっくり戻す
+        const description = await getParam('/robot_state_publisher', 'robot_description');
+        const plugins = typeof description === 'string'
+          ? [...description.matchAll(/<hardware>[\s\S]*?<plugin>\s*([^<\s]+)\s*<\/plugin>/g)].map(m => m[1])
+          : [];
+        const simulatedOnly = plugins.length > 0 && plugins.every(p => /^(fake|mock)_components\//.test(p));
+        const timeFromStart = simulatedOnly ? { sec: 0, nanosec: 10_000_000 } : { sec: 3, nanosec: 0 };
+
+        const { nodes } = await call('/rosapi/nodes', 'rosapi_msgs/srv/Nodes', {});
+        const managers = (nodes as string[]).filter(n => /(^|\/)controller_manager$/.test(n));
+        await Promise.all(managers.map(async (cm) => {
+          const ns = cm.slice(0, cm.lastIndexOf('/') + 1);
+          const candidates = (nodes as string[]).filter(n => n !== cm && n.startsWith(ns) && !n.slice(ns.length).includes('/'));
+          await Promise.all(candidates.map(async (node) => {
+            const type = await getParam(cm, `${node.slice(ns.length)}.type`);
+            if (typeof type !== 'string') return;
+
+            if (type.endsWith('/JointTrajectoryController')) {
+              const joints = await getParam(node, 'joints');
+              if (!Array.isArray(joints) || joints.length === 0 || !joints.every((j: string) => initial.has(j))) return;
+              new ROSLIB.Topic({ ros, name: `${node}/joint_trajectory`, messageType: 'trajectory_msgs/msg/JointTrajectory' }).publish({
+                header: { stamp: { sec: 0, nanosec: 0 }, frame_id: '' },
+                joint_names: joints,
+                points: [{
+                  positions: joints.map((j: string) => initial.get(j)),
+                  velocities: [], accelerations: [], effort: [],
+                  time_from_start: timeFromStart,
+                }],
+              });
+              joints.forEach((j: string) => covered.add(j));
+            } else if (type.endsWith('/GripperActionController')) {
+              const joint = await getParam(node, 'joint');
+              if (typeof joint !== 'string' || !initial.has(joint)) return;
+              new ROSLIB.Action({ ros, name: `${node}/gripper_cmd`, actionType: 'control_msgs/action/GripperCommand' })
+                .sendGoal({ command: { position: initial.get(joint), max_effort: 0 } }, () => {}, undefined, () => {});
+              covered.add(joint);
+            }
+          }));
+        }));
+      } catch (e) { console.warn('関節のリセット指令を送れませんでした', e); }
+    }
+
+    initial.forEach((position, name) => {
+      if (!covered.has(name)) jointPositionsRef.current.set(name, position);
     });
     needsUpdateRef.current = true;
   }, []);
