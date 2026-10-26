@@ -88,11 +88,13 @@ export default function App() {
             再接続の瞬間に /odom を旧・新2系統から送ってしまいタイムスタンプが
             逆転することがある(cartographerのordered_multi_queueがFATALで落ちる原因)。
             常時マウントしCSSで表示切替する。 */}
-        <div className={`flex-1 flex-col md:flex-row gap-4 min-h-0 ${activeTab === 'simulator' ? 'flex' : 'hidden'}`}>
-          <div className="flex-1 md:max-w-[60%] flex flex-col min-h-0 min-w-0 bg-white rounded-lg border border-gray-200 shadow-sm">
+        {/* 狭い画面では縦並びになるため、シミュレータを高さ確保してメインにし、
+            カメラ・ログはスクロールで下に表示する */}
+        <div className={`flex-1 flex-col md:flex-row gap-4 min-h-0 overflow-y-auto md:overflow-visible ${activeTab === 'simulator' ? 'flex' : 'hidden'}`}>
+          <div className="h-full flex-shrink-0 md:h-auto md:flex-1 md:flex-shrink md:max-w-[60%] flex flex-col min-h-[300px] md:min-h-0 min-w-0 bg-white rounded-lg border border-gray-200 shadow-sm">
             <SimulatorView onSceneReady={setSharedScene} />
           </div>
-          <aside className="flex flex-col md:flex-1 gap-4 min-h-0 min-w-0">
+          <aside className="flex flex-col flex-shrink-0 md:flex-shrink md:flex-1 gap-4 min-h-0 min-w-0">
             <div className="flex-1 min-h-[250px] bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
               <RobotCameraView scene={sharedScene} />
             </div>
