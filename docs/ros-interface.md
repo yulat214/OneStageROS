@@ -62,7 +62,7 @@ OneStageROS が ROS 2 とやり取りするトピック・ノードの一覧で�
 ros2 launch slam_toolbox online_async_launch.py
 ```
 
-LiDAR の計測範囲は最大 3.5 m です。slam_toolbox のパラメータ `max_laser_range` を `3.5` 以下に設定すると、何も検出しなかった方向に壁が誤って作られるのを防げます。
+LiDAR の計測範囲は最大 12 m です。slam_toolbox のパラメータ `max_laser_range` を `12.0` 以下に設定すると、何も検出しなかった方向に壁が誤って作られるのを防げます。
 
 ### Cartographer
 
