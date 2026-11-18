@@ -502,6 +502,67 @@ function expandWorkspacePath(p) {
     return getSafeAbsolutePath(p);
 }
 
+// --- ビルド対象の推定 ---
+// 編集中のファイルから親ディレクトリをたどり、パッケージ（package.xml）とワークスペース（colcon build を実行する場所）を推定する。
+// ワークスペースは次の順で選ぶ:
+//   1. src/ と build/・install/・log/ のどれかがあり、src/ の下にファイルがある（ビルド済み）
+//   2. src/ の下にファイルがある（未ビルド）
+//   3. build/・install/・log/ のどれかがある
+const BUILD_DIRS = ['build', 'install', 'log'];
+
+function isDir(p) {
+    try { return fs.statSync(p).isDirectory(); } catch { return false; }
+}
+
+function readPackageName(pkgXml) {
+    try {
+        const m = fs.readFileSync(pkgXml, 'utf-8').match(/<name>\s*([^<\s]+)\s*<\/name>/);
+        return m ? m[1] : null;
+    } catch { return null; }
+}
+
+function detectBuildTarget(absFile) {
+    const start = isDir(absFile) ? absFile : path.dirname(absFile);
+    const parents = [];
+    for (let d = start; ; d = path.dirname(d)) {
+        parents.push(d);
+        if (d === WORKSPACE_ROOT || d === path.dirname(d)) break;
+    }
+    // パッケージ: いちばん近い package.xml
+    const pkgDir = parents.find(d => fs.existsSync(path.join(d, 'package.xml')));
+    const pkg = pkgDir ? { dir: pkgDir, name: readPackageName(path.join(pkgDir, 'package.xml')) } : null;
+    // ワークスペース: パッケージより上で探す（C++ パッケージの src/ などを誤認しないように）
+    const target = pkg ? pkg.dir : start;
+    let builtWithSrc = null, srcOnly = null, builtOnly = null;
+    for (const d of parents.slice(parents.indexOf(target) + (pkg ? 1 : 0))) {
+        const src = path.join(d, 'src');
+        const underSrc = isDir(src) && (target + path.sep).startsWith(src + path.sep);
+        const built = BUILD_DIRS.some(n => isDir(path.join(d, n)));
+        if (underSrc && built && !builtWithSrc) builtWithSrc = d;
+        if (underSrc && !srcOnly) srcOnly = d;
+        if (built && !builtOnly) builtOnly = d;
+    }
+    const ws = builtWithSrc || srcOnly || builtOnly;
+    if (!ws) return { workspace: null, package: pkg?.name ?? null, built: false };
+    const rel = path.relative(WORKSPACE_ROOT, ws);
+    return {
+        workspace: rel ? `~/${rel.split(path.sep).join('/')}` : '~',
+        workspaceAbs: ws,
+        package: pkg?.name ?? null,
+        built: BUILD_DIRS.some(n => isDir(path.join(ws, n))),
+    };
+}
+
+app.get('/api/build/detect', (req, res) => {
+    try {
+        if (!req.query.file) return res.status(400).json({ error: 'file is required' });
+        const real = assertWithinWorkspace(getSafeAbsolutePath(req.query.file));
+        res.json(detectBuildTarget(real));
+    } catch (e) {
+        res.status(e.status || 500).json({ error: e.message });
+    }
+});
+
 app.get('/api/build', (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');

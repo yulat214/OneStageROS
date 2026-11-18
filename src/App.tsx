@@ -117,7 +117,7 @@ export default function App() {
                 onSaveSuccess={() => buildPanelRef.current?.onFileSaved()}
               />
             </div>
-            <BuildPanel ref={buildPanelRef} />
+            <BuildPanel ref={buildPanelRef} activeFilePath={activeFilePath} />
           </div>
         </div>
       </main>
