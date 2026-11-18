@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] - 2026-11-18
+
+### Added
+- The build panel estimates the workspace and package from the file open in the editor (the nearest `package.xml`, and the directory above it that has `src/` and `build/`, `install/` or `log/`). An empty workspace field is filled in automatically. When the field differs, the estimated workspace is shown with a button to use it. The package can be selected from the build options
+- `GET /api/build/detect?file=<path>` returns the estimated workspace and package
+
+### Changed
+- LiDAR range is 12.0 m (previously 3.5 m)
+- The login screen is shown only after the backend responds
+
+### Security
+- Updated dependencies to fix `npm audit` vulnerabilities
+
 ## [2.0.0] - 2026-10-09
 
 ### Changed

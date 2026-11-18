@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react';
-import { Hammer, ChevronDown, ChevronUp, X, Settings, Play } from 'lucide-react';
+import { Hammer, ChevronDown, ChevronUp, X, Settings, Play, Lightbulb } from 'lucide-react';
 
 type LogEntry = { type: 'stdout' | 'stderr' | 'error' | 'system'; text: string };
 type BuildStatus = 'idle' | 'building' | 'success' | 'failed';
@@ -8,7 +8,22 @@ export interface BuildPanelHandle {
   onFileSaved: () => void;
 }
 
-export const BuildPanel = forwardRef<BuildPanelHandle>((_, ref) => {
+interface BuildPanelProps {
+  /** エディターで開いているファイル（ホームからの相対パス）。ここからワークスペースとパッケージを推定する */
+  activeFilePath?: string | null;
+}
+
+/** 編集中のファイルから推定したビルド対象（/api/build/detect） */
+type BuildTarget = { workspace: string | null; workspaceAbs?: string; package: string | null; built: boolean };
+
+/** 入力されたワークスペースが推定結果と同じ場所か（~/ws, ~/ws/, ws, /home/user/ws を同じとみなす） */
+function sameWorkspace(input: string, target: BuildTarget): boolean {
+  const v = input.trim().replace(/\/+$/, '');
+  if (!v || !target.workspace) return false;
+  return v === target.workspace || v === target.workspaceAbs || `~/${v}` === target.workspace;
+}
+
+export const BuildPanel = forwardRef<BuildPanelHandle, BuildPanelProps>(({ activeFilePath }, ref) => {
   const [status, setStatus] = useState<BuildStatus>('idle');
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [isExpanded, setIsExpanded] = useState(false);
@@ -20,6 +35,7 @@ export const BuildPanel = forwardRef<BuildPanelHandle>((_, ref) => {
   const [runAfterBuild, setRunAfterBuild] = useState(false);
   const [runCommand, setRunCommand] = useState('');
   const [isRunning, setIsRunning] = useState(false);
+  const [detected, setDetected] = useState<BuildTarget | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
   const esRef = useRef<EventSource | null>(null);
   const runEsRef = useRef<EventSource | null>(null);
@@ -28,6 +44,26 @@ export const BuildPanel = forwardRef<BuildPanelHandle>((_, ref) => {
   useEffect(() => {
     if (isExpanded) logEndRef.current?.scrollIntoView({ behavior: 'auto' });
   }, [logs, isExpanded]);
+
+  // 開いているファイルが変わったら、ビルド対象を推定する。ワークスペースが空欄なら推定結果を入れる
+  useEffect(() => {
+    if (!activeFilePath) { setDetected(null); return; }
+    let cancelled = false;
+    fetch(`${API_BASE}/build/detect?file=${encodeURIComponent(activeFilePath)}`)
+      .then(r => (r.ok ? r.json() : null))
+      .then((t: BuildTarget | null) => {
+        if (cancelled) return;
+        setDetected(t && t.workspace ? t : null);
+        if (t?.workspace) setWorkspace(w => (w.trim() ? w : t.workspace!));
+      })
+      .catch(() => { if (!cancelled) setDetected(null); });
+    return () => { cancelled = true; };
+  }, [activeFilePath, API_BASE]);
+
+  const applyWorkspace = useCallback((value: string) => {
+    setWorkspace(value);
+    localStorage.setItem('build_workspace', value);
+  }, []);
 
   useEffect(() => () => {
     esRef.current?.close();
@@ -173,7 +209,7 @@ export const BuildPanel = forwardRef<BuildPanelHandle>((_, ref) => {
         {/* 中央: ワークスペース（常時表示） */}
         <input
           value={workspace}
-          onChange={e => { setWorkspace(e.target.value); localStorage.setItem('build_workspace', e.target.value); }}
+          onChange={e => applyWorkspace(e.target.value)}
           onClick={e => e.stopPropagation()}
           className="flex-1 min-w-0 border border-gray-300 rounded px-2 py-1 text-sm font-mono"
           placeholder="ビルドするワークスペースを入力してください（例：~/ros2_ws）"
@@ -209,6 +245,24 @@ export const BuildPanel = forwardRef<BuildPanelHandle>((_, ref) => {
         </div>
       </div>
 
+      {/* 編集中のファイルから推定したワークスペース（入力欄と違うときだけ表示） */}
+      {detected && !sameWorkspace(workspace, detected) && (
+        <div className="flex items-center gap-2 px-4 py-1.5 bg-amber-50 border-t border-amber-100 text-sm text-gray-700">
+          <Lightbulb className="w-3.5 h-3.5 text-amber-500 flex-shrink-0" />
+          <span className="min-w-0 truncate">
+            編集中のファイルのワークスペース: <span className="font-mono">{detected.workspace}</span>
+            <span className="text-gray-500">（{detected.built ? 'ビルド済み' : '未ビルド'}
+            {detected.package && <>・パッケージ <span className="font-mono">{detected.package}</span></>}）</span>
+          </span>
+          <button
+            onClick={() => applyWorkspace(detected.workspace!)}
+            className="ml-auto shrink-0 px-2 py-0.5 rounded border border-amber-300 bg-white hover:bg-amber-100 text-sm"
+          >
+            このワークスペースにする
+          </button>
+        </div>
+      )}
+
       {/* 詳細オプション */}
       {showOptions && (
         <div className="px-4 py-3 bg-gray-50 border-t border-gray-100 flex flex-col gap-2 text-sm">
@@ -220,6 +274,15 @@ export const BuildPanel = forwardRef<BuildPanelHandle>((_, ref) => {
               className="flex-1 border border-gray-300 rounded px-2 py-1 font-mono"
               placeholder="my_package  ← 空白で全ビルド"
             />
+            {detected?.package && packageFilter.trim() !== detected.package && (
+              <button
+                onClick={() => setPackageFilter(detected.package!)}
+                className="shrink-0 px-2 py-0.5 rounded border border-gray-300 bg-white hover:bg-gray-100"
+                title="編集中のファイルのパッケージだけをビルドする"
+              >
+                <span className="font-mono">{detected.package}</span> だけ
+              </button>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <input

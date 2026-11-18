@@ -1,6 +1,6 @@
 {
       "name": "onestage-ros",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "description": "A browser-based ROS 2 development IDE — URDF visualizer, code editor, and debug console in one tab.",
       "author": "yulala tateno <shigineko64@yahoo.co.jp>",
       "license": "MIT",
