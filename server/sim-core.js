@@ -13,7 +13,7 @@ const RATE_HZ = 30;
 const MAX_DT = 0.1; // 周期が乱れても位置が飛ばないよう dt を 100ms でキャップ
 const LIDAR_Z = 0.15; // base_link → base_scan（ブラウザの LiDAR シミュレーションと揃える）
 // LiDAR の仕様（ブラウザ側 src/hooks/useLidarSim.ts の local モードと揃える）
-const LIDAR = { numRays: 360, minRange: 0.12, maxRange: 3.5, everyNTicks: 3 /* 30Hz / 3 = 10Hz */ };
+const LIDAR = { numRays: 360, minRange: 0.12, maxRange: 12.0, everyNTicks: 3 /* 30Hz / 3 = 10Hz */ };
 // three.js の material.side（FrontSide / BackSide / DoubleSide）
 const FRONT_SIDE = 0;
 const BACK_SIDE = 1;
