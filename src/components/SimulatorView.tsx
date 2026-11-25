@@ -146,7 +146,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
   const [isEditorOpen, setIsEditorOpen] = useState(false); // ワールド編集パネルの開閉
   const [isObjListOpen, setIsObjListOpen] = useState(false); // 編集パネル内「オブジェクト」の折りたたみ
 
-  const { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, publishTF, initialPoseRef, simMode, simModeRef, simPoseRef, publishInitialPose } = useROS(jointTopic);
+  const { rosStatus, jointPositionsRef, cmdVelRef, needsUpdateRef, publishScan, publishTF, initialPoseRef, simMode, simModeRef, simPoseRef, publishInitialPose, resetJoints } = useROS(jointTopic);
   const { obstacles, addWorldModel, addBuiltMesh, removeObjectById, updateObjectPose, clearObstacles, exportEnvironment, loadEnvironment } = useWorldManager(scene);
   const { simulateLidar } = useLidarSim();
 
@@ -367,10 +367,11 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     }
   }, [pushPoseToServer]);
 
-  // ロボットの位置・速度・一時停止状態を初期姿勢に戻す（オブジェクトの扱いは呼び出し側）
+  // ロボットの位置・関節角・速度・一時停止状態を初期状態に戻す（オブジェクトの扱いは呼び出し側）
   const resetRobot = () => {
     const home = initialRobotPoseRef.current;
     notifyNavOfPose(home);
+    resetJoints();
     currentPoseRef.current = { ...home };
     odomOriginRef.current = { ...home };
     cmdVelRef.current = { linearX: 0, angularZ: 0 };
@@ -810,6 +811,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
     releaseHeldObject();
     clearSelection();
     clearObstacles();
+    resetJoints();
     try {
       isRestoringRef.current = true;
       const { objects, robot } = await loadWorldFromSdf(wp);
@@ -824,7 +826,7 @@ export function SimulatorView({ onSceneReady, jointTopic = '/joint_states' }: Si
       console.error(e);
       alert('ワールドの再読み込みに失敗しました。');
     }
-  }, [clearObstacles, clearSelection, releaseHeldObject, loadWorldFromSdf, applyRobotPose, notifyNavOfPose, cmdVelRef, postSim, simModeRef]);
+  }, [clearObstacles, clearSelection, releaseHeldObject, resetJoints, loadWorldFromSdf, applyRobotPose, notifyNavOfPose, cmdVelRef, postSim, simModeRef]);
 
   // 「リセット」ボタンの実処理。
   //  - ワールド起動モード: 部屋ごと初期状態に戻す（resetTrial）

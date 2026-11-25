@@ -42,6 +42,8 @@ OneStageROS が ROS 2 とやり取りするトピック・ノードの一覧で�
 | `/onestage/odom` | `nav_msgs/msg/Odometry` | オドメトリ（`odom` → `base_link`） |
 | `/onestage/sim_pose` | `geometry_msgs/msg/PoseStamped` | ロボットの位置（`onestage_world` フレーム） |
 | `/initialpose` | `geometry_msgs/msg/PoseWithCovarianceStamped` | リセット後のロボットの位置（`map` フレーム。`map` → `odom` を受信している場合のみ） |
+| `<コントローラ名>/joint_trajectory` | `trajectory_msgs/msg/JointTrajectory` | リセット時の関節の戻り先（`JointTrajectoryController` が動いている場合のみ） |
+| `<コントローラ名>/gripper_cmd` | `control_msgs/action/GripperCommand`（アクション） | リセット時のグリッパーの戻り先（`GripperActionController` が動いている場合のみ） |
 | `/camera/camera/color/image_raw` | `sensor_msgs/msg/Image` | カラー画像 |
 | `/camera/camera/depth/image_rect_raw` | `sensor_msgs/msg/Image` | 深度画像 |
 | `/camera/camera/color/camera_info` | `sensor_msgs/msg/CameraInfo` | カメラの内部パラメータ |
